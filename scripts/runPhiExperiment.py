@@ -20,8 +20,7 @@ load_dotenv(ROOT / ".env")
 from fa_1 import intake_agent  # noqa: E402
 
 DATASET_NAME = "PriorAuth Dataset"
-FEEDBACK_KEY = "phi"  # PHI Detection — not phi_safe
-POLL_SECONDS = 90
+FEEDBACK_KEY = "phi"  # PHI Detection
 POLL_INTERVAL = 5
 
 
