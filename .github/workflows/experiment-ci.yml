@@ -1,0 +1,38 @@
+name: Experiment CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "agents/fa_2.py"
+      - "agents/fa_1.py"
+      - "agents/redact_phi.py"
+      - "scripts/runPhiExperiment.py"
+      - "scripts/runExperiment.py"
+
+jobs:
+  experiment:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: uv sync
+
+      # PHI leak experiment: uses hub prompt bcbs-poc-phi-safe-judge (workspace "PHI Safe").
+      # Exits 1 if any example scores phi_safe=0 — see scripts/runPhiExperiment.py.
+      - name: Run PHI LangSmith experiment
+        env:
+          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+          # LangSmith LLM Gateway (OPENAI_API_KEY = LC gateway key)
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+        run: uv run python scripts/runPhiExperiment.py
