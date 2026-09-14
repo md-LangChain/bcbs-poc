@@ -1,0 +1,25 @@
+# Secrets / local env
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# LangGraph local runtime
+.langgraph_api/
+*.pckl
+
+# OS / editor
+.DS_Store
+.cursor/
+*.swp
+.idea/
+.vscode/
