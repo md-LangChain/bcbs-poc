@@ -44,11 +44,18 @@ ClinicalNoteFreeText: {case.get('ClinicalNoteFreeText')}
     return {"output": output, "case_id": case_id}
 
 
+def _feedback_stats(results) -> dict:
+    """get_experiment_results may return a dict or an object."""
+    if isinstance(results, dict):
+        return results.get("feedback_stats") or {}
+    return getattr(results, "feedback_stats", None) or {}
+
+
 def _wait_for_scores(client: Client, experiment_name: str) -> dict:
     deadline = time.time() + POLL_SECONDS
     while time.time() < deadline:
         results = client.get_experiment_results(name=experiment_name)
-        stats = results.feedback_stats or {}
+        stats = _feedback_stats(results)
         if FEEDBACK_KEY in stats:
             return stats[FEEDBACK_KEY]
         print(f"waiting for {FEEDBACK_KEY} on experiment={experiment_name}…")
