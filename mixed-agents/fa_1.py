@@ -1,82 +1,51 @@
-"""FA-1 Intake via Microsoft Agent Framework workflows.
+"""FA-1 Intake via Microsoft Agent Framework Agent + tools.
 
 case_id → read CSV → flag missing fields → Case dict for FA-2.
 
 No PHI redaction in this mixed-agents path (intentional contrast with agents/).
 
-Tracing (LangSmith project bcbs-mixed):
-  - ``@traceable`` parent + child steps so Inputs/Outputs show full case data
-  - MAF OTEL spans are OFF by default (empty I/O; set ENABLE_MAF_OTEL=true to opt in)
+Tracing (LangSmith project bcbs-mixed-fa1) via MAF OpenTelemetry:
+  https://docs.langchain.com/langsmith/trace-with-microsoft-agent-framework
+
+Expect traces like: invoke_agent → chat → read_case / validate_case → chat
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import os
 import sys
 from pathlib import Path
-from typing import Any, Never
+from typing import Annotated, Any
 
 import pandas as pd
-from agent_framework import Executor, WorkflowBuilder, WorkflowContext, handler
 from dotenv import load_dotenv
-from langsmith import traceable, uuid7
-from langsmith.run_helpers import get_current_run_tree
+from pydantic import Field
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-from tracing import TRACING_PROJECT, ensure_mixed_tracing_project  # noqa: E402
+from tracing import (  # noqa: E402
+    FA1_PROJECT,
+    configure_maf_langsmith_otel,
+    ensure_mixed_tracing_project,
+    flush_otel,
+)
 
-ensure_mixed_tracing_project()
-
+# Import Case from fa_2 first (fa_2 may set LANGSMITH_PROJECT to fa2), then pin FA-1.
 from fa_2 import Case  # noqa: E402
 
+ensure_mixed_tracing_project(
+    FA1_PROJECT,
+    description="Mixed-agents FA-1 (Microsoft Agent Framework) intake traces.",
+)
+configure_maf_langsmith_otel(FA1_PROJECT)
 
-def _configure_langsmith_otel() -> None:
-    """Optional MAF→LangSmith OTEL. Off by default — those spans have empty I/O."""
-    if os.getenv("ENABLE_MAF_OTEL", "").lower() not in {"1", "true", "yes"}:
-        os.environ.setdefault("LANGSMITH_TRACING", "true")
-        return
-
-    api_key = os.getenv("LANGSMITH_API_KEY")
-    if not api_key:
-        return
-
-    os.environ.setdefault("ENABLE_INSTRUMENTATION", "true")
-    os.environ.setdefault("ENABLE_SENSITIVE_DATA", "true")
-    os.environ.setdefault("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
-    os.environ.setdefault(
-        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-        "https://api.smith.langchain.com/otel/v1/traces",
-    )
-    os.environ["OTEL_EXPORTER_OTLP_HEADERS"] = (
-        f"x-api-key={api_key},Langsmith-Project={TRACING_PROJECT}"
-    )
-    os.environ.setdefault("LANGSMITH_TRACING", "true")
-
-    from agent_framework.observability import configure_otel_providers
-
-    configure_otel_providers(enable_sensitive_data=True)
-
-
-def _flush_otel() -> None:
-    if os.getenv("ENABLE_MAF_OTEL", "").lower() not in {"1", "true", "yes"}:
-        return
-    try:
-        from opentelemetry import trace
-
-        provider = trace.get_tracer_provider()
-        force_flush = getattr(provider, "force_flush", None)
-        if callable(force_flush):
-            force_flush(timeout_millis=10_000)
-    except Exception:  # noqa: BLE001
-        pass
-
-
-_configure_langsmith_otel()
+from agent_framework import Agent, tool  # noqa: E402
+from agent_framework.openai import OpenAIChatCompletionClient  # noqa: E402
 
 CSV_PATH = (
     Path(__file__).resolve().parent.parent
@@ -104,6 +73,9 @@ REQUIRED_FIELDS = (
     "PlantedTestCondition",
 )
 
+# Latest validated case from tools — used so invoke() still returns a Case dict for FA-2.
+_LAST_CASE: dict[str, Any] = {}
+
 
 def _is_missing(value: Any) -> bool:
     if value is None:
@@ -115,12 +87,7 @@ def _is_missing(value: Any) -> bool:
     return False
 
 
-# --- Business logic (traced so LangSmith shows full Inputs/Outputs) ---
-
-
-@traceable(name="read_case", run_type="tool")
-def read_case_logic(case_id: str) -> dict[str, Any]:
-    """Load one CSV row. Return value = LangSmith Outputs."""
+def _load_case(case_id: str) -> dict[str, Any]:
     df = pd.read_csv(CSV_PATH)
     match = df[df["CaseID"] == case_id]
     if match.empty:
@@ -137,9 +104,7 @@ def read_case_logic(case_id: str) -> dict[str, Any]:
     return row
 
 
-@traceable(name="validate_case", run_type="tool")
-def validate_case_logic(state: dict[str, Any]) -> dict[str, Any]:
-    """Flag missing required fields. Return value = LangSmith Outputs."""
+def _validate_case(state: dict[str, Any]) -> dict[str, Any]:
     missing = [f for f in REQUIRED_FIELDS if _is_missing(state.get(f))]
     return {
         **state,
@@ -150,55 +115,52 @@ def validate_case_logic(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-# --- MAF executors (orchestration); they call the traced helpers above ---
+@tool(name="read_case", description="Load a prior-auth case from the CSV by CaseID.")
+def read_case(
+    case_id: Annotated[str, Field(description="Prior-auth CaseID, e.g. PA-1021")],
+) -> str:
+    case = _load_case(case_id)
+    _LAST_CASE.clear()
+    _LAST_CASE.update(case)
+    return json.dumps(case, default=str)
 
 
-class ReadCase(Executor):
-    @handler(input=dict, output=dict)
-    async def run(self, state: dict[str, Any], ctx: WorkflowContext[dict]) -> None:
-        await ctx.send_message(read_case_logic(str(state.get("case_id"))))
+@tool(
+    name="validate_case",
+    description="Validate a prior-auth case JSON for missing required fields.",
+)
+def validate_case(
+    case_json: Annotated[str, Field(description="Case object as JSON from read_case")],
+) -> str:
+    state = json.loads(case_json)
+    validated = _validate_case(state)
+    _LAST_CASE.clear()
+    _LAST_CASE.update(validated)
+    return json.dumps(validated, default=str)
 
 
-class ValidateCase(Executor):
-    @handler(input=dict, workflow_output=dict)
-    async def run(
-        self, state: dict[str, Any], ctx: WorkflowContext[Never, dict]
-    ) -> None:
-        await ctx.yield_output(validate_case_logic(state))
-
-
-def create_intake_workflow():
-    read_case = ReadCase(id="read_case")
-    validate = ValidateCase(id="validate_case")
-    return (
-        WorkflowBuilder(start_executor=read_case, name="fa-1-intake")
-        .add_edge(read_case, validate)
-        .build()
+def create_intake_agent() -> Agent[Any]:
+    model = (
+        os.getenv("OPENAI_MODEL")
+        or os.getenv("OPENAI_CHAT_COMPLETION_MODEL")
+        or "gpt-4.1-mini"
+    )
+    client = OpenAIChatCompletionClient(model=model)
+    return Agent(
+        client=client,
+        name="fa-1-intake",
+        instructions=(
+            "You are the prior-auth intake agent. "
+            "For the given CaseID: call read_case, then validate_case with that JSON. "
+            "Reply briefly with CaseID, whether validation passed, and any missing_fields."
+        ),
+        tools=[read_case, validate_case],
     )
 
 
-@traceable(name="fa-1-intake", run_type="chain")
-async def _run_intake(case_id: str) -> dict[str, Any]:
-    """Parent trace: Inputs = {case_id}, Outputs = full case dict.
-
-    Each invoke gets a unique LangSmith thread_id (not tied to case_id).
-    """
-    thread_id = str(uuid7())
-    run_tree = get_current_run_tree()
-    if run_tree is not None:
-        run_tree.metadata["thread_id"] = thread_id
-        run_tree.extra.setdefault("metadata", {})["thread_id"] = thread_id
-
-    workflow = create_intake_workflow()
-    events = await workflow.run({"case_id": case_id})
-    outputs = events.get_outputs()
-    if not outputs:
-        return {"case_id": case_id}
-    result = outputs[-1]
-    return result if isinstance(result, dict) else {"case_id": case_id}
-
-
 class _IntakeAgentShim:
+    """Sync/async invoke API expected by FA-2 and experiment scripts."""
+
     def invoke(
         self,
         inputs: Case | dict[str, Any],
@@ -207,13 +169,24 @@ class _IntakeAgentShim:
         try:
             return asyncio.run(self.ainvoke({"case_id": inputs["case_id"]}))
         finally:
-            _flush_otel()
+            flush_otel()
 
     async def ainvoke(self, inputs: dict[str, Any]) -> dict[str, Any]:
+        case_id = str(inputs["case_id"])
+        _LAST_CASE.clear()
+        agent = create_intake_agent()
+        session = agent.create_session()
         try:
-            return await _run_intake(str(inputs["case_id"]))
+            await agent.run(
+                f"Intake prior-auth case {case_id}. Use your tools.",
+                session=session,
+            )
+            if _LAST_CASE:
+                return dict(_LAST_CASE)
+            # Fallback if the model skipped tools
+            return _validate_case(_load_case(case_id))
         finally:
-            _flush_otel()
+            flush_otel()
 
 
 intake_agent = _IntakeAgentShim()
@@ -225,5 +198,5 @@ if __name__ == "__main__":
     print("error:", result.get("error"))
     print("missing_fields:", result.get("missing_fields"))
     note = result.get("ClinicalNoteFreeText") or ""
-    print("ClinicalNoteFreeText:", note)
-    print("→ LangSmith project bcbs-mixed, open run 'fa-1-intake' (not workflow.* spans)")
+    print("ClinicalNoteFreeText:", note[:200], "..." if len(note) > 200 else "")
+    print(f"→ LangSmith project {FA1_PROJECT}: open 'invoke_agent fa-1-intake'")

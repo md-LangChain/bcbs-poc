@@ -17,10 +17,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-# Route LangChain traces to bcbs-mixed (same Application as bcbs-poc)
-from tracing import ensure_mixed_tracing_project  # noqa: E402
+# Route LangChain traces to bcbs-mixed-fa2 (same Application as bcbs-poc)
+from tracing import FA2_PROJECT, ensure_mixed_tracing_project  # noqa: E402
 
-ensure_mixed_tracing_project()
+ensure_mixed_tracing_project(
+    FA2_PROJECT,
+    description="Mixed-agents FA-2 (LangChain) validation / criteria traces.",
+)
 
 #delete comment 
 class IntakeInput(TypedDict):
@@ -78,13 +81,21 @@ def run_intake(case_id: str) -> str:
     Pauses for human input when intake reports errors, missing fields, or high cost.
     """
 
-    #import and use intake agent 
-    from fa_1 import intake_agent
+    # FA-1 OTEL → bcbs-mixed-fa1; keep this process's LangChain project on fa2.
+    import os
 
-    result = intake_agent.invoke(
-        {"case_id": case_id},
-        config={"configurable": {"thread_id": case_id}},
-    )
+    from tracing import FA2_PROJECT
+
+    prev_project = os.environ.get("LANGSMITH_PROJECT")
+    try:
+        from fa_1 import intake_agent
+
+        result = intake_agent.invoke(
+            {"case_id": case_id},
+            config={"configurable": {"thread_id": case_id}},
+        )
+    finally:
+        os.environ["LANGSMITH_PROJECT"] = prev_project or FA2_PROJECT
     # Drop bulky free-text for the tool payload; agent can still see key flags.
     payload = {
         "case_id": case_id,
@@ -135,12 +146,20 @@ def evaluate_criteria(case_id: str) -> str:
     Call after a successful run_intake. Returns meets_criteria, borderline, rationale.
     Pauses for human review when borderline.
     """
-    from fa_1 import intake_agent
+    import os
 
-    case = intake_agent.invoke(
-        {"case_id": case_id},
-        config={"configurable": {"thread_id": f"criteria-{case_id}"}},
-    )
+    from tracing import FA2_PROJECT
+
+    prev_project = os.environ.get("LANGSMITH_PROJECT")
+    try:
+        from fa_1 import intake_agent
+
+        case = intake_agent.invoke(
+            {"case_id": case_id},
+            config={"configurable": {"thread_id": f"criteria-{case_id}"}},
+        )
+    finally:
+        os.environ["LANGSMITH_PROJECT"] = prev_project or FA2_PROJECT
     if case.get("error") or case.get("missing_fields"):
         return json.dumps(
             {
@@ -242,7 +261,7 @@ if __name__ == "__main__":
     )
     print(first["messages"][-1].content)
     second = local.invoke(
-        {"messages": [{"role": "user", "content": "PA-1001"}]},
+        {"messages": [{"role": "user", "content": "PA-1002"}]},
         config,
     )
     if "__interrupt__" in second:
