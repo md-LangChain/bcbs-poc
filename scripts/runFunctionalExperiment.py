@@ -76,7 +76,7 @@ if __name__ == "__main__":
         target,
         data=DATASET_NAME,
         evaluators=[interrupt_type_correct],
-        experiment_prefix="Experiment",
+        experiment_prefix="Functional-Experiment",
         max_concurrency=1,
     )
     print(results)

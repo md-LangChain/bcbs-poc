@@ -8,7 +8,7 @@ on:
       - "agents/fa_1.py"
       - "agents/redact_phi.py"
       - "scripts/runPhiExperiment.py"
-      - "scripts/runExperiment.py"
+      - "scripts/runFunctionalExperiment.py"
 
 jobs:
   experiment:

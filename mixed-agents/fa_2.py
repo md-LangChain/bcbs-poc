@@ -1,15 +1,17 @@
 """FA-2 validation agent — intake tool + POC clinical criteria eval."""
 
 import json
+import os
 import sys
 from pathlib import Path
-from typing import NotRequired, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 from dotenv import load_dotenv
-from langchain.agents import create_agent
+from langchain.agents import AgentState, create_agent
 from langchain.chat_models import init_chat_model
-from langchain.tools import tool
-from langgraph.types import interrupt
+from langchain.messages import ToolMessage
+from langchain.tools import ToolRuntime, tool
+from langgraph.types import Command, interrupt
 from pydantic import BaseModel, Field
 
 # langgraph / mixed path: siblings importable by path
@@ -25,7 +27,7 @@ ensure_mixed_tracing_project(
     description="Mixed-agents FA-2 (LangChain) validation / criteria traces.",
 )
 
-#delete comment 
+
 class IntakeInput(TypedDict):
     case_id: str
 
@@ -56,6 +58,12 @@ class Case(TypedDict):
     eligible: NotRequired[bool]
 
 
+class Fa2State(AgentState):
+    """Agent messages + full FA-1 case for evaluate_criteria (no second FA-1 call)."""
+
+    intake_case: NotRequired[dict[str, Any] | None]
+
+
 class CriteriaResult(BaseModel):
     meets_criteria: bool = Field(
         description="True only if evidence clearly supports medical necessity"
@@ -73,30 +81,35 @@ def _criteria_llm():
     return init_chat_model("openai:gpt-4.1-mini").with_structured_output(CriteriaResult)
 
 
-@tool
-def run_intake(case_id: str) -> str:
-    """Run FA-1 intake/validation for a prior-auth case id (e.g. PA-1001).
+def _intake_matches(case: dict[str, Any] | None, case_id: str) -> bool:
+    if not case:
+        return False
+    return str(case.get("case_id") or case.get("CaseID") or "") == case_id
 
-    Returns JSON with case fields plus error, missing_fields, high_cost, eligible.
-    Pauses for human input when intake reports errors, missing fields, or high cost.
-    """
 
-    # FA-1 OTEL → bcbs-mixed-fa1; keep this process's LangChain project on fa2.
-    import os
-
-    from tracing import FA2_PROJECT
-
+def _invoke_fa1(case_id: str) -> dict[str, Any]:
+    """Call mixed FA-1; keep LangChain project on bcbs-mixed-fa2 afterward."""
     prev_project = os.environ.get("LANGSMITH_PROJECT")
     try:
         from fa_1 import intake_agent
 
-        result = intake_agent.invoke(
+        return intake_agent.invoke(
             {"case_id": case_id},
             config={"configurable": {"thread_id": case_id}},
         )
     finally:
         os.environ["LANGSMITH_PROJECT"] = prev_project or FA2_PROJECT
-    # Drop bulky free-text for the tool payload; agent can still see key flags.
+
+
+@tool
+def run_intake(case_id: str, runtime: ToolRuntime) -> Command:
+    """Run FA-1 intake/validation for a prior-auth case id (e.g. PA-1001).
+
+    Returns JSON with case fields plus error, missing_fields, high_cost, eligible.
+    Stores the full case in graph state for evaluate_criteria.
+    Does not pause for HITL — that happens in evaluate_criteria.
+    """
+    result = _invoke_fa1(case_id)
     payload = {
         "case_id": case_id,
         "CaseID": result.get("CaseID"),
@@ -110,69 +123,98 @@ def run_intake(case_id: str) -> str:
         "eligible": result.get("eligible"),
     }
 
-    needs_hitl = bool(
-        result.get("error") or result.get("missing_fields") or result.get("high_cost")
+    return Command(
+        update={
+            "intake_case": result,
+            "messages": [
+                ToolMessage(
+                    content=json.dumps(payload, default=str),
+                    tool_call_id=runtime.tool_call_id,
+                )
+            ],
+        }
     )
-    if needs_hitl:
-        if result.get("error") or result.get("missing_fields"):
-            interrupt_type = "intake_validation_failed"
-            message = (
-                "Intake found problems. Review missing fields / error, "
-                "then resume with a note (e.g. how you will fix) or cancel."
-            )
-        else:
-            interrupt_type = "high_cost_hitl"
-            message = (
-                "Estimated cost exceeds the high-cost threshold. "
-                "Human review required before continuing. "
-                "Resume with approve, deny, or request-more-info."
-            )
-        decision = interrupt(
-            {
-                "type": interrupt_type,
-                "message": message,
-                "payload": payload,
-            }
-        )
-        payload["human_decision"] = decision
-
-    return json.dumps(payload, default=str)
 
 
 @tool
-def evaluate_criteria(case_id: str) -> str:
+def evaluate_criteria(case_id: str, runtime: ToolRuntime) -> str:
     """POC InterQual-style clinical criteria check for a case id.
 
-    Call after a successful run_intake. Returns meets_criteria, borderline, rationale.
-    Pauses for human review when borderline.
+    Call after run_intake. Uses intake_case from graph state (does not re-run FA-1).
+    HITL pauses: intake validation failure, high_cost, or borderline criteria.
+    Returns meets_criteria, borderline, rationale (or skipped + human_decision).
     """
-    import os
-
-    from tracing import FA2_PROJECT
-
-    prev_project = os.environ.get("LANGSMITH_PROJECT")
-    try:
-        from fa_1 import intake_agent
-
-        case = intake_agent.invoke(
-            {"case_id": case_id},
-            config={"configurable": {"thread_id": f"criteria-{case_id}"}},
-        )
-    finally:
-        os.environ["LANGSMITH_PROJECT"] = prev_project or FA2_PROJECT
-    if case.get("error") or case.get("missing_fields"):
+    case = runtime.state.get("intake_case") if runtime.state else None
+    if not _intake_matches(case, case_id):
         return json.dumps(
             {
                 "case_id": case_id,
                 "skipped": True,
+                "reason": "No intake_case in state for this case_id; call run_intake first.",
+            },
+            default=str,
+        )
+    assert case is not None
+
+    intake_payload = {
+        "case_id": case_id,
+        "CaseID": case.get("CaseID"),
+        "ServiceRequested": case.get("ServiceRequested"),
+        "CPTCode": case.get("CPTCode"),
+        "ICD10Code": case.get("ICD10Code"),
+        "EstimatedCost": case.get("EstimatedCost"),
+        "error": case.get("error"),
+        "missing_fields": case.get("missing_fields"),
+        "high_cost": case.get("high_cost"),
+        "eligible": case.get("eligible"),
+    }
+
+    if case.get("error") or case.get("missing_fields"):
+        decision = interrupt(
+            {
+                "type": "intake_validation_failed",
+                "message": (
+                    "Intake found problems. Review missing fields / error, "
+                    "then resume with a note (e.g. how you will fix) or cancel."
+                ),
+                "payload": intake_payload,
+            }
+        )
+        return json.dumps(
+            {
+                **intake_payload,
+                "skipped": True,
                 "reason": "Case failed intake validation; fix intake first.",
-                "error": case.get("error"),
-                "missing_fields": case.get("missing_fields"),
+                "human_decision": decision,
             },
             default=str,
         )
 
-    prompt = f"""You are a prior-auth clinical criteria reviewer (POC).
+    if case.get("high_cost"):
+        decision = interrupt(
+            {
+                "type": "high_cost_hitl",
+                "message": (
+                    "Estimated cost exceeds the high-cost threshold. "
+                    "Human review required before continuing. "
+                    "Resume with approve, deny, or request-more-info."
+                ),
+                "payload": intake_payload,
+            }
+        )
+        intake_payload["human_decision"] = decision
+        decision_text = str(decision).strip().lower()
+        if decision_text in {"deny", "denied", "cancel", "cancelled", "reject"}:
+            return json.dumps(
+                {
+                    **intake_payload,
+                    "skipped": True,
+                    "reason": "High-cost HITL did not approve continuing to criteria.",
+                },
+                default=str,
+            )
+
+    system_prompt = f"""You are a prior-auth clinical criteria reviewer (POC).
 Decide meets_criteria and borderline using only these fields. Do not invent facts.
 
 - meets_criteria=true only if evidence clearly supports medical necessity.
@@ -188,14 +230,17 @@ InterQualCriteriaSet: {case.get('InterQualCriteriaSet')}
 RequestedUrgency: {case.get('RequestedUrgency')}
 ClinicalNoteFreeText: {case.get('ClinicalNoteFreeText')}
 """
-    result = _criteria_llm().invoke(prompt)
+    result = _criteria_llm().invoke(system_prompt)
     payload = {
         "case_id": case_id,
         "CaseID": case.get("CaseID"),
         "meets_criteria": result.meets_criteria,
         "borderline": result.borderline,
         "rationale": result.rationale,
+        "high_cost": case.get("high_cost"),
     }
+    if "human_decision" in intake_payload:
+        payload["high_cost_human_decision"] = intake_payload["human_decision"]
 
     if result.borderline:
         decision = interrupt(
@@ -217,12 +262,12 @@ SYSTEM_PROMPT = (
     "You help providers validate BCBS prior-authorization cases.\n"
     "1) If the user has not given a case id (like PA-1001), ask for one.\n"
     "2) Call run_intake with that case id.\n"
-    "3) If intake is valid (no blocking error/missing fields), call evaluate_criteria "
-    "for the same case id.\n"
+    "3) Always call evaluate_criteria for the same case id after intake "
+    "(even when high_cost is true; HITL lives there).\n"
     "4) Explain results clearly:\n"
-    "   - Intake HITL (validation failure or high_cost): use human_decision + payload.\n"
-    "   - Criteria: report meets_criteria, borderline, and rationale. "
-    "If borderline HITL paused, summarize the human decision after resume.\n"
+    "   - evaluate_criteria HITL: intake validation failure, high_cost, or borderline — "
+    "use human_decision + payload.\n"
+    "   - Criteria: report meets_criteria, borderline, and rationale.\n"
     "Do not invent clinical values. Keep replies concise."
 )
 
@@ -231,6 +276,7 @@ fa2 = create_agent(
     model="openai:gpt-4.1-mini",
     tools=[run_intake, evaluate_criteria],
     system_prompt=SYSTEM_PROMPT,
+    state_schema=Fa2State,
     name="fa2-validation-agent",
     # No custom checkpointer — langgraph dev / API provide persistence.
 )
@@ -240,18 +286,19 @@ if __name__ == "__main__":
     import uuid
 
     from langgraph.checkpoint.memory import MemorySaver
-    from langgraph.types import Command
+    from langgraph.types import Command as ResumeCommand
 
     local = create_agent(
         model="openai:gpt-4.1-mini",
         tools=[run_intake, evaluate_criteria],
         system_prompt=SYSTEM_PROMPT,
+        state_schema=Fa2State,
         name="fa2-validation-agent-local",
         checkpointer=MemorySaver(),
     )
     config = {
         "configurable": {"thread_id": f"fa2-demo-{uuid.uuid4().hex[:8]}"},
-        "metadata": {},  # filled below with same thread_id for LangSmith Threads
+        "metadata": {},
         "tags": ["bcbs", "fa-2", "mixed-agents"],
     }
     config["metadata"]["thread_id"] = config["configurable"]["thread_id"]
@@ -261,12 +308,14 @@ if __name__ == "__main__":
     )
     print(first["messages"][-1].content)
     second = local.invoke(
-        {"messages": [{"role": "user", "content": "PA-1002"}]},
+        {"messages": [{"role": "user", "content": "PA-1001"}]},
         config,
     )
     if "__interrupt__" in second:
         print("INTERRUPTED:", second["__interrupt__"])
-        resumed = local.invoke(Command(resume="approve"), config)
+        resumed = local.invoke(ResumeCommand(resume="approve"), config)
         print(resumed["messages"][-1].content)
+        print("intake_case in state:", bool(resumed.get("intake_case")))
     else:
         print(second["messages"][-1].content)
+        print("intake_case in state:", bool(second.get("intake_case")))

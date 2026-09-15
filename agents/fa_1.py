@@ -2,10 +2,12 @@ from pathlib import Path
 import math
 import sys
 from typing import Any
+import os 
 
 import pandas as pd
 from dotenv import load_dotenv
 from langgraph.graph import END, START, StateGraph
+from langsmith import tracing_context
 
 # langgraph dev loads this file by path, so siblings are not importable by default
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -13,7 +15,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fa_2 import Case, IntakeInput
 from redact_phi import redact_clinical_note
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+#Change tracing project 
+
+os.environ["LANGSMITH_PROJECT"] = "bcbs-intake-agent"
+
+
+# Own LangSmith project (does not steal FA-2 / bcbs-poc traces when co-hosted).
+FA1_PROJECT = os.getenv("LANGSMITH_FA1_PROJECT", "bcbs-poc-fa1")
 
 CSV_PATH = Path(__file__).resolve().parent.parent / "data" / "BCBSRI_Synthetic_PriorAuth_Datasetv1.csv"
 
