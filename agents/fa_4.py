@@ -1,58 +1,60 @@
-# agents/fa_4.py — FA-4 MCP Tool Server
-# Demo: discovery of MCP endpoints + least-privilege eligibility lookup.
-# Call with SyntheticMemberID only (e.g. SMBR-000018 → ineligible).
+"""FA-4 member eligibility — LangGraph graph.
 
-from mcp.server.fastmcp import FastMCP
+Input:  {"member_id": "SMBR-000001"}  (SyntheticMemberID only; no PHI / clinical text)
+Output: eligibility payload for FA-1 / FA-2.
 
-mcp = FastMCP(
-    "bcbsri-member-eligibility",
-    instructions=(
-        "Synthetic BCBSRI member eligibility lookup. No PHI. "
-        "Least-privilege: accept member_id only; never send clinical notes or free text."
-    ),
-)
+POC: always returns eligible=True (same payload shape). Planted deny can return later.
+"""
 
-INELIGIBLE_MEMBER_ID = "SMBR-000018"  # PA-1018 planted termination
+from __future__ import annotations
 
-ELIGIBILITY = {
-    f"SMBR-{n:06d}": {
+import os
+from pathlib import Path
+from typing import NotRequired, TypedDict
+
+from dotenv import load_dotenv
+from langgraph.graph import END, START, StateGraph
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+os.environ.setdefault("LANGSMITH_PROJECT", "bcbs-eligibility-agent")
+
+
+class EligibilityInput(TypedDict):
+    member_id: str
+
+
+class EligibilityState(TypedDict):
+    member_id: str
+    eligible: NotRequired[bool]
+    plan_status: NotRequired[str]
+    network: NotRequired[str]
+    auth_required: NotRequired[bool]
+    reason: NotRequired[str]
+
+
+def lookup_eligibility(state: EligibilityState) -> dict:
+    """Resolve member eligibility. Least-privilege: uses member_id only."""
+    key = (state.get("member_id") or "").strip()
+    # Always eligible for deploy / MCP wiring POC.
+    return {
+        "member_id": key,
         "eligible": True,
         "plan_status": "active",
         "network": "in-network",
         "auth_required": True,
         "reason": "Active member; prior auth may still be required for this service.",
     }
-    for n in range(1, 26)
-}
-ELIGIBILITY[INELIGIBLE_MEMBER_ID] = {
-    "eligible": False,
-    "plan_status": "terminated",
-    "network": "unknown",
-    "auth_required": False,
-    "reason": "Member not eligible on service date (synthetic termination).",
-}
 
 
-@mcp.tool()
-def lookup_member_eligibility(member_id: str) -> dict:
-    """Look up synthetic member eligibility for a prior-auth request.
+builder = StateGraph(EligibilityState, input_schema=EligibilityInput)
+builder.add_node("lookup_eligibility", lookup_eligibility)
+builder.add_edge(START, "lookup_eligibility")
+builder.add_edge("lookup_eligibility", END)
 
-    Args:
-        member_id: SyntheticMemberID like SMBR-000001. No PHI.
-    """
-    key = (member_id or "").strip()
-    row = ELIGIBILITY.get(key)
-    if row is None:
-        return {
-            "member_id": key,
-            "eligible": False,
-            "plan_status": "not_found",
-            "network": "unknown",
-            "auth_required": False,
-            "reason": f"Unknown member_id: {key}",
-        }
-    return {"member_id": key, **row}
+eligibility_agent = builder.compile(name="fa-4-eligibility")
 
 
 if __name__ == "__main__":
-    mcp.run()  # stdio
+    for mid in ("SMBR-000001", "SMBR-000018", "SMBR-999999"):
+        out = eligibility_agent.invoke({"member_id": mid})
+        print(mid, "→", out)

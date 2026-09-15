@@ -22,7 +22,6 @@ os.environ["LANGSMITH_PROJECT"] = "bcbs-intake-agent"
 
 
 # Own LangSmith project (does not steal FA-2 / bcbs-poc traces when co-hosted).
-FA1_PROJECT = os.getenv("LANGSMITH_FA1_PROJECT", "bcbs-poc-fa1")
 
 CSV_PATH = Path(__file__).resolve().parent.parent / "data" / "BCBSRI_Synthetic_PriorAuth_Datasetv1.csv"
 

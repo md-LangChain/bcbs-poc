@@ -5,8 +5,8 @@
   "graphs": {
     "fa_1": "./agents/fa_1.py:intake_agent",
     "fa_2": "./agents/fa_2.py:fa2",
+    "fa_4": "./agents/fa_4.py:eligibility_agent",
     "test_agent": "./agents/testAgent.py:app"
-
   },
   "env": ".env"
 }
