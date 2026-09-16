@@ -45,7 +45,7 @@ class Case(TypedDict):
     error: NotRequired[str | None]
     missing_fields: NotRequired[list[str]]
     high_cost: NotRequired[bool]
-    eligible: NotRequired[bool]
+    eligible: NotRequired[bool | None]
 
 
 class CriteriaResult(BaseModel):

@@ -10,6 +10,7 @@ from langgraph.graph import END, START, StateGraph
 # langgraph dev loads this file by path, so siblings are not importable by default
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from eligibility import lookup_eligibility
 from fa_2 import Case, IntakeInput
 from redact_phi import redact_clinical_note
 
@@ -22,10 +23,12 @@ FA-1 Intake: case_id → read CSV → redact_phi → validate → pass Case stat
 State schema inherited from fa_2.Case.
 If incomplete: missing_fields = [...], error = message string.
 Also sets high_cost when EstimatedCost exceeds HIGH_COST_THRESHOLD (HITL gate).
-Eligibility: stub helper in validate — all members eligible for now (FA-4 later).
+Eligibility: looked up in validate; None when the member id cannot be resolved.
 """
 
 HIGH_COST_THRESHOLD = 10000.0
+
+UNRESOLVED_PLAN_STATUSES = ("not_found", "invalid_member_id")
 
 REQUIRED_FIELDS = (
     "CaseID",
@@ -84,15 +87,18 @@ def _is_high_cost(state: Case) -> bool:
     return float(cost) > HIGH_COST_THRESHOLD
 
 
-def _is_eligible(state: Case) -> bool:
-    """Member eligibility stub — everyone eligible for now."""
-    return True
+def _eligibility(state: Case) -> bool | None:
+    """Member eligibility from the lookup; None when the member id cannot be resolved."""
+    result = lookup_eligibility({"member_id": state.get("SyntheticMemberID")})
+    if result["plan_status"] in UNRESOLVED_PLAN_STATUSES:
+        return None
+    return result["eligible"]
 
 
 def validate_case(state: Case) -> dict:
     """Validate required fields; set missing_fields, error, high_cost, eligible."""
     high_cost = _is_high_cost(state)
-    eligible = _is_eligible(state)
+    eligible = _eligibility(state)
     missing = [f for f in REQUIRED_FIELDS if _is_missing(state.get(f))]
     if missing:
         return {
