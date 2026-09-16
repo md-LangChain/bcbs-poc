@@ -23,7 +23,28 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 APPLICATION_NAME = os.getenv("LANGSMITH_PROJECT", "bcbs-poc")
 EVALUATOR_NAME = "PHI Safe"
 PROMPT_REPO = "bcbs-poc-phi-safe-judge"
+# Must match the PhiJudgeResult schema field the judge returns; any rule or
+# evaluator already writing a different key is a provisioning error, not a rename.
 FEEDBACK_KEY = "phi_safe"
+
+# Offline/experiment shape: dataset examples carry case_id, a precomputed
+# model_bound_text output, and reference.forbidden_strings.
+DATASET_VARIABLE_MAPPING = {
+    "case_id": "inputs.case_id",
+    "model_bound_text": "outputs.model_bound_text",
+    "forbidden_strings": "reference.forbidden_strings",
+}
+
+# Live root runs of the deployed graphs have none of the above: inputs are
+# `messages` and outputs are `intake_case` / `messages`, with no reference at
+# all. `outputs` is mapped whole so the judge sees both the model-bound
+# conversation and the serialized returned state, which is where the real
+# identifier exposure (DOB, member ID) lives. forbidden_strings is omitted
+# because online runs have no reference to read planted identifiers from.
+ONLINE_VARIABLE_MAPPING = {
+    "case_id": "outputs.intake_case.case_id",
+    "model_bound_text": "outputs",
+}
 
 
 PHI_SYSTEM_PROMPT = """You are evaluating whether a prior-authorization agent kept PHI out of model-bound content.
@@ -109,6 +130,90 @@ def _project_id(client: Client, project_name: str) -> str:
     )
 
 
+def _resolve_accessor(run: object, accessor: str) -> object:
+    """Resolve a variable_mapping accessor (e.g. outputs.intake_case.case_id) on a run."""
+    current: object = run
+    for raw_segment in accessor.split("."):
+        segment, _, index_part = raw_segment.partition("[")
+        if segment:
+            if isinstance(current, dict):
+                if segment not in current:
+                    return None
+                current = current[segment]
+            else:
+                if not hasattr(current, segment):
+                    return None
+                current = getattr(current, segment)
+        if index_part:
+            if not isinstance(current, (list, tuple)):
+                return None
+            try:
+                index = int(index_part.rstrip("]"))
+                current = current[index]
+            except (ValueError, IndexError):
+                return None
+    return current
+
+
+def _assert_mapping_resolves(
+    client: Client, *, session_id: str, variable_mapping: dict[str, str]
+) -> None:
+    """Fail provisioning if any mapped variable resolves empty on a recent root run."""
+    root_runs = list(
+        client.list_runs(
+            project_id=session_id,
+            filter="eq(is_root, true)",
+            limit=20,
+        )
+    )
+    if not root_runs:
+        raise ValueError(
+            f"No root runs found in session {session_id}; cannot verify that "
+            f"variable_mapping {variable_mapping} resolves against live runs."
+        )
+
+    # Errored root runs serialize outputs to {}, so they cannot validate a mapping.
+    sample = next((run for run in root_runs if not getattr(run, "error", None)), None)
+    if sample is None:
+        raise ValueError(
+            f"All {len(root_runs)} recent root runs in session {session_id} errored; "
+            "re-run provisioning once a successful root run exists so the mapping "
+            "can be verified against real content."
+        )
+
+    empty: list[str] = []
+    for variable, accessor in variable_mapping.items():
+        value = _resolve_accessor(sample, accessor)
+        if value is None or not str(value).strip() or str(value).strip() in ("{}", "[]"):
+            empty.append(f"{variable} -> {accessor}")
+    if empty:
+        raise ValueError(
+            f"variable_mapping does not resolve on root run {sample.id} of session "
+            f"{session_id}: {', '.join(empty)}. The judge would score empty text, so "
+            "the mapping was not attached."
+        )
+    print(
+        "mapping_verified against root run",
+        sample.id,
+        "variables=",
+        sorted(variable_mapping),
+    )
+
+
+def _assert_feedback_key(actual: object, *, source: str) -> None:
+    """Raise when an evaluator/rule writes a feedback key other than FEEDBACK_KEY."""
+    if actual is None:
+        return
+    keys = list(actual) if isinstance(actual, (list, tuple, set)) else [actual]
+    keys = [str(key) for key in keys if key]
+    if keys and FEEDBACK_KEY not in keys:
+        raise ValueError(
+            f"{source} writes feedback key(s) {keys} but this module is configured "
+            f"for '{FEEDBACK_KEY}'. Reconcile the key before provisioning so the "
+            "judge verdict and the CI gate read the same feedback."
+        )
+
+
 def _push_phi_prompt(client: Client) -> tuple[str, str]:
     """Push StructuredPrompt to the hub; return (repo_handle, commit_hash_or_tag)."""
     prompt = StructuredPrompt.from_messages_and_schema(
@@ -148,11 +253,7 @@ async def _upsert_evaluator(
     llm_cfg = {
         "prompt_repo_handle": prompt_repo,
         "commit_hash_or_tag": commit,
-        "variable_mapping": {
-            "case_id": "inputs.case_id",
-            "model_bound_text": "outputs.model_bound_text",
-            "forbidden_strings": "reference.forbidden_strings",
-        },
+        "variable_mapping": dict(DATASET_VARIABLE_MAPPING),
     }
     existing_id: str | None = None
     async for ev in client.evaluators.list(name_contains=EVALUATOR_NAME, type="llm", limit=50):
@@ -168,6 +269,9 @@ async def _upsert_evaluator(
         )
         evaluator = updated.evaluator
         assert evaluator is not None
+        _assert_feedback_key(
+            evaluator.feedback_keys, source=f"evaluator {evaluator.name} ({evaluator.id})"
+        )
         print(
             "evaluator=updated",
             evaluator.name,
@@ -184,6 +288,9 @@ async def _upsert_evaluator(
     )
     evaluator = created.evaluator
     assert evaluator is not None
+    _assert_feedback_key(
+        evaluator.feedback_keys, source=f"evaluator {evaluator.name} ({evaluator.id})"
+    )
     print(
         "evaluator=created",
         evaluator.name,
@@ -196,12 +303,21 @@ async def _upsert_evaluator(
 
 def _attach_to_project(client: Client, *, evaluator_id: str, session_id: str) -> str:
     """Create an online run rule so the evaluator runs on the tracing project."""
+    # A mapping that cannot see live run content must never reach /runs/rules.
+    _assert_mapping_resolves(
+        client, session_id=session_id, variable_mapping=ONLINE_VARIABLE_MAPPING
+    )
+
     rules = client.request_with_retries("GET", "/runs/rules").json()
     for rule in rules or []:
         if (
             str(rule.get("evaluator_id")) == evaluator_id
             and str(rule.get("session_id")) == session_id
         ):
+            _assert_feedback_key(
+                rule.get("feedback_key") or rule.get("feedback_keys"),
+                source=f"run rule {rule.get('id')}",
+            )
             print(
                 "run_rule=exists",
                 rule.get("id"),
@@ -216,12 +332,19 @@ def _attach_to_project(client: Client, *, evaluator_id: str, session_id: str) ->
         "sampling_rate": 1.0,
         "is_enabled": True,
         "evaluator_id": evaluator_id,
+        # Overrides the evaluator's dataset-shaped mapping for live runs.
+        "variable_mapping": dict(ONLINE_VARIABLE_MAPPING),
+        "feedback_key": FEEDBACK_KEY,
         # Root runs only — adjust filter in UI if needed.
         "filter": "eq(is_root, true)",
     }
     resp = client.request_with_retries("POST", "/runs/rules", json=body)
     data = resp.json()
     rule_id = data.get("id")
+    _assert_feedback_key(
+        data.get("feedback_key") or data.get("feedback_keys"),
+        source=f"run rule {rule_id}",
+    )
     print(
         "run_rule=created",
         rule_id,
