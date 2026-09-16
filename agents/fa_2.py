@@ -2,11 +2,13 @@
 
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import NotRequired, TypedDict
 
 from dotenv import load_dotenv
 from langchain.agents import create_agent
+from langchain.agents.middleware import ModelRequest, ModelResponse, wrap_model_call
 from langchain.chat_models import init_chat_model
 from langchain.tools import tool
 from langgraph.types import interrupt
@@ -189,6 +191,19 @@ ClinicalNoteFreeText: {case.get('ClinicalNoteFreeText')}
     return json.dumps(payload, default=str)
 
 
+@wrap_model_call
+def sequential_tool_calls(
+    request: ModelRequest,
+    handler: Callable[[ModelRequest], ModelResponse],
+) -> ModelResponse:
+    """Disable parallel tool calls so evaluate_criteria never shares a batch with run_intake."""
+    return handler(
+        request.override(
+            model_settings={**request.model_settings, "parallel_tool_calls": False}
+        )
+    )
+
+
 SYSTEM_PROMPT = (
     "You help providers validate BCBS prior-authorization cases.\n"
     "1) If the user has not given a case id (like PA-1001), ask for one.\n"
@@ -206,6 +221,7 @@ SYSTEM_PROMPT = (
 fa2 = create_agent(
     model="openai:gpt-4.1-mini",
     tools=[run_intake, evaluate_criteria],
+    middleware=[sequential_tool_calls],
     system_prompt=SYSTEM_PROMPT,
     name="fa2-validation-agent",
     # No custom checkpointer — langgraph dev / API provide persistence.
@@ -221,6 +237,7 @@ if __name__ == "__main__":
     local = create_agent(
         model="openai:gpt-4.1-mini",
         tools=[run_intake, evaluate_criteria],
+        middleware=[sequential_tool_calls],
         system_prompt=SYSTEM_PROMPT,
         name="fa2-validation-agent-local",
         checkpointer=MemorySaver(),
