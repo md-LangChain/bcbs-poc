@@ -1,10 +1,10 @@
-"""FA-2 validation agent — intake tool + POC clinical criteria eval."""
+"""Validation agent — intake tool + POC clinical criteria eval."""
 
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Any, NotRequired, TypedDict
+import os
 
 from dotenv import load_dotenv
 from langchain.agents import AgentState, create_agent
@@ -14,18 +14,15 @@ from langchain.tools import ToolRuntime, tool
 from langgraph.types import Command, interrupt
 from pydantic import BaseModel, Field
 
-# langgraph / mixed path: siblings importable by path
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+_AGENT_DIR = Path(__file__).resolve().parent
+_AGENTS_DIR = _AGENT_DIR.parent
+_REPO_ROOT = _AGENTS_DIR.parent
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+# langgraph loads this file by path; add intake sibling for run_intake
+sys.path.insert(0, str(_AGENTS_DIR / "intake"))
 
-# Route LangChain traces to bcbs-mixed-fa2 (same Application as bcbs-poc)
-from tracing import FA2_PROJECT, ensure_mixed_tracing_project  # noqa: E402
-
-ensure_mixed_tracing_project(
-    FA2_PROJECT,
-    description="Mixed-agents FA-2 (LangChain) validation / criteria traces.",
-)
+load_dotenv(_REPO_ROOT / ".env")
+os.environ["LANGSMITH_PROJECT"] = "bcbs-validation-agent"
 
 
 class IntakeInput(TypedDict):
@@ -87,20 +84,6 @@ def _intake_matches(case: dict[str, Any] | None, case_id: str) -> bool:
     return str(case.get("case_id") or case.get("CaseID") or "") == case_id
 
 
-def _invoke_fa1(case_id: str) -> dict[str, Any]:
-    """Call mixed FA-1; keep LangChain project on bcbs-mixed-fa2 afterward."""
-    prev_project = os.environ.get("LANGSMITH_PROJECT")
-    try:
-        from fa_1 import intake_agent
-
-        return intake_agent.invoke(
-            {"case_id": case_id},
-            config={"configurable": {"thread_id": case_id}},
-        )
-    finally:
-        os.environ["LANGSMITH_PROJECT"] = prev_project or FA2_PROJECT
-
-
 @tool
 def run_intake(case_id: str, runtime: ToolRuntime) -> Command:
     """Run FA-1 intake/validation for a prior-auth case id (e.g. PA-1001).
@@ -109,7 +92,13 @@ def run_intake(case_id: str, runtime: ToolRuntime) -> Command:
     Stores the full case in graph state for evaluate_criteria.
     Does not pause for HITL — that happens in evaluate_criteria.
     """
-    result = _invoke_fa1(case_id)
+    from intake import intake_agent
+
+    result = intake_agent.invoke(
+        {"case_id": case_id},
+        config={"configurable": {"thread_id": case_id}},
+    )
+    # Slim payload for the model; full case stays in state.intake_case.
     payload = {
         "case_id": case_id,
         "CaseID": result.get("CaseID"),
@@ -272,13 +261,12 @@ SYSTEM_PROMPT = (
 )
 
 
-fa2 = create_agent(
+validation_agent = create_agent(
     model="openai:gpt-4.1-mini",
     tools=[run_intake, evaluate_criteria],
     system_prompt=SYSTEM_PROMPT,
     state_schema=Fa2State,
-    name="fa2-validation-agent",
-    # No custom checkpointer — langgraph dev / API provide persistence.
+    name="validation",
 )
 
 
@@ -293,15 +281,13 @@ if __name__ == "__main__":
         tools=[run_intake, evaluate_criteria],
         system_prompt=SYSTEM_PROMPT,
         state_schema=Fa2State,
-        name="fa2-validation-agent-local",
+        name="validation-local",
         checkpointer=MemorySaver(),
     )
     config = {
-        "configurable": {"thread_id": f"fa2-demo-{uuid.uuid4().hex[:8]}"},
-        "metadata": {},
-        "tags": ["bcbs", "fa-2", "mixed-agents"],
+        "configurable": {"thread_id": f"validation-demo-{uuid.uuid4().hex[:8]}"},
+        "tags": ["bcbs", "validation"],
     }
-    config["metadata"]["thread_id"] = config["configurable"]["thread_id"]
     first = local.invoke(
         {"messages": [{"role": "user", "content": "I need to validate a prior auth case."}]},
         config,
@@ -315,7 +301,6 @@ if __name__ == "__main__":
         print("INTERRUPTED:", second["__interrupt__"])
         resumed = local.invoke(ResumeCommand(resume="approve"), config)
         print(resumed["messages"][-1].content)
-        print("intake_case in state:", bool(resumed.get("intake_case")))
     else:
         print(second["messages"][-1].content)
         print("intake_case in state:", bool(second.get("intake_case")))

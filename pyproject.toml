@@ -10,9 +10,24 @@ dependencies = [
     "dotenv>=0.9.9",
     "langchain>=1.3.18",
     "langchain-openai>=1.6.0",
-    "langgraph-api>=0.14.1",
-    "langgraph-cli[inmem]>=0.4.31",
     "opentelemetry-exporter-otlp-proto-http>=1.42.0,<1.43",
-    "panda>=0.3.1",
     "pandas>=3.0.5",
 ]
+
+# Local only — do NOT put langgraph-api/cli in runtime deps (Cloud image provides them;
+# pinning them overwrites the server and often breaks builds).
+[dependency-groups]
+dev = [
+    "langgraph-api>=0.14.1",
+    "langgraph-cli[inmem]>=0.4.31",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+# Graphs are loaded by path from langgraph.*.json; do not auto-discover
+# top-level dirs (agents/, data/, …) as installable packages.
+[tool.setuptools]
+packages = []
+

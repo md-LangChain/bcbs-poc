@@ -1,10 +1,10 @@
 """FA-2 validation agent — intake tool + POC clinical criteria eval."""
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, NotRequired, TypedDict
-import os 
 
 from dotenv import load_dotenv
 from langchain.agents import AgentState, create_agent
@@ -14,11 +14,18 @@ from langchain.tools import ToolRuntime, tool
 from langgraph.types import Command, interrupt
 from pydantic import BaseModel, Field
 
-# langgraph dev loads this file by path, so siblings are not importable by default
+# langgraph / mixed path: siblings importable by path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-os.environ["LANGSMITH_PROJECT"] = "bcbs-validation-agent"
+
+# Route LangChain traces to bcbs-mixed-validation (same Application as bcbs-poc)
+from utils.tracing import VALIDATION_PROJECT, ensure_mixed_tracing_project  # noqa: E402
+
+ensure_mixed_tracing_project(
+    VALIDATION_PROJECT,
+    description="Mixed-agents validation (LangChain) criteria traces.",
+)
 
 
 class IntakeInput(TypedDict):
@@ -80,21 +87,29 @@ def _intake_matches(case: dict[str, Any] | None, case_id: str) -> bool:
     return str(case.get("case_id") or case.get("CaseID") or "") == case_id
 
 
+def _invoke_intake(case_id: str) -> dict[str, Any]:
+    """Call mixed intake; keep LangChain project on bcbs-mixed-validation afterward."""
+    prev_project = os.environ.get("LANGSMITH_PROJECT")
+    try:
+        from intake import intake_agent
+
+        return intake_agent.invoke(
+            {"case_id": case_id},
+            config={"configurable": {"thread_id": case_id}},
+        )
+    finally:
+        os.environ["LANGSMITH_PROJECT"] = prev_project or VALIDATION_PROJECT
+
+
 @tool
 def run_intake(case_id: str, runtime: ToolRuntime) -> Command:
-    """Run FA-1 intake/validation for a prior-auth case id (e.g. PA-1001).
+    """Run intake/validation for a prior-auth case id (e.g. PA-1001).
 
     Returns JSON with case fields plus error, missing_fields, high_cost, eligible.
     Stores the full case in graph state for evaluate_criteria.
     Does not pause for HITL — that happens in evaluate_criteria.
     """
-    from fa_1 import intake_agent
-
-    result = intake_agent.invoke(
-        {"case_id": case_id},
-        config={"configurable": {"thread_id": case_id}},
-    )
-    # Slim payload for the model; full case stays in state.intake_case.
+    result = _invoke_intake(case_id)
     payload = {
         "case_id": case_id,
         "CaseID": result.get("CaseID"),
@@ -188,7 +203,6 @@ def evaluate_criteria(case_id: str, runtime: ToolRuntime) -> str:
             }
         )
         intake_payload["human_decision"] = decision
-        # If human denies / cancels, skip criteria; otherwise continue.
         decision_text = str(decision).strip().lower()
         if decision_text in {"deny", "denied", "cancel", "cancelled", "reject"}:
             return json.dumps(
@@ -284,8 +298,10 @@ if __name__ == "__main__":
     )
     config = {
         "configurable": {"thread_id": f"fa2-demo-{uuid.uuid4().hex[:8]}"},
-        "tags": ["bcbs", "fa-2"],
+        "metadata": {},
+        "tags": ["bcbs", "fa-2", "mixed-agents"],
     }
+    config["metadata"]["thread_id"] = config["configurable"]["thread_id"]
     first = local.invoke(
         {"messages": [{"role": "user", "content": "I need to validate a prior auth case."}]},
         config,
@@ -299,6 +315,7 @@ if __name__ == "__main__":
         print("INTERRUPTED:", second["__interrupt__"])
         resumed = local.invoke(ResumeCommand(resume="approve"), config)
         print(resumed["messages"][-1].content)
+        print("intake_case in state:", bool(resumed.get("intake_case")))
     else:
         print(second["messages"][-1].content)
         print("intake_case in state:", bool(second.get("intake_case")))

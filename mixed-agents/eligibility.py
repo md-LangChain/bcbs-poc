@@ -1,22 +1,28 @@
-"""FA-4 member eligibility — LangGraph graph.
+"""Eligibility — LangGraph graph (mixed-agents copy).
 
-Input:  {"member_id": "SMBR-000001"}  (SyntheticMemberID only; no PHI / clinical text)
-Output: eligibility payload for FA-1 / FA-2.
-
-POC: always returns eligible=True (same payload shape). Planted deny can return later.
+Input:  {"member_id": "SMBR-000001"}
+Output: eligibility payload.
 """
 
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from typing import NotRequired, TypedDict
 
 from dotenv import load_dotenv
 from langgraph.graph import END, START, StateGraph
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
-os.environ.setdefault("LANGSMITH_PROJECT", "bcbs-eligibility-agent")
+
+from utils.tracing import ELIGIBILITY_PROJECT, ensure_mixed_tracing_project  # noqa: E402
+
+ensure_mixed_tracing_project(
+    ELIGIBILITY_PROJECT,
+    description="Mixed-agents eligibility (LangGraph) traces.",
+)
 
 
 class EligibilityInput(TypedDict):
@@ -33,16 +39,20 @@ class EligibilityState(TypedDict):
 
 
 def lookup_eligibility(state: EligibilityState) -> dict:
-    """Resolve member eligibility. Least-privilege: uses member_id only."""
     key = (state.get("member_id") or "").strip()
-    # Always eligible for deploy / MCP wiring POC.
+    # Planted deny: SMBR-000024 == CaseID PA-1024 in the synthetic CSV
+    eligible = key != "SMBR-000024"
     return {
         "member_id": key,
-        "eligible": True,
-        "plan_status": "active",
-        "network": "in-network",
-        "auth_required": True,
-        "reason": "Active member; prior auth may still be required for this service.",
+        "eligible": eligible,
+        "plan_status": "active" if eligible else "inactive",
+        "network": "in-network" if eligible else "unknown",
+        "auth_required": eligible,
+        "reason": (
+            "Active member; prior auth may still be required for this service."
+            if eligible
+            else "Member not eligible (planted deny for PA-1024 / SMBR-000024)."
+        ),
     }
 
 
@@ -55,6 +65,4 @@ eligibility_agent = builder.compile(name="fa-4-eligibility")
 
 
 if __name__ == "__main__":
-    for mid in ("SMBR-000001", "SMBR-000018", "SMBR-999999"):
-        out = eligibility_agent.invoke({"member_id": mid})
-        print(mid, "→", out)
+    print(eligibility_agent.invoke({"member_id": "SMBR-000001"}))

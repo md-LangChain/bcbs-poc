@@ -1,9 +1,10 @@
 """LangSmith project setup for mixed-agents.
 
 Projects (same Application=bcbs-poc):
-  - bcbs-mixed-fa1  — FA-1 (Microsoft Agent Framework)
-  - bcbs-mixed-fa2  — FA-2 (LangChain)
-  - bcbs-mixed      — misc demos (e.g. weather_agent)
+  - bcbs-mixed-intake       — intake (Microsoft Agent Framework)
+  - bcbs-mixed-validation  — validation (LangChain)
+  - bcbs-mixed-eligibility — eligibility (LangGraph)
+  - bcbs-mixed             — misc demos
 
 MAF → LangSmith OTEL:
   https://docs.langchain.com/langsmith/trace-with-microsoft-agent-framework
@@ -17,11 +18,16 @@ from pathlib import Path
 from dotenv import load_dotenv
 from langsmith import Client
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
-FA1_PROJECT = os.getenv("LANGSMITH_MIXED_FA1_PROJECT", "bcbs-mixed-fa1")
-FA2_PROJECT = os.getenv("LANGSMITH_MIXED_FA2_PROJECT", "bcbs-mixed-fa2")
-# Default / demo project (weather_agent)
+INTAKE_PROJECT = os.getenv("LANGSMITH_MIXED_INTAKE_PROJECT", "bcbs-mixed-intake")
+VALIDATION_PROJECT = os.getenv(
+    "LANGSMITH_MIXED_VALIDATION_PROJECT", "bcbs-mixed-validation"
+)
+ELIGIBILITY_PROJECT = os.getenv(
+    "LANGSMITH_MIXED_ELIGIBILITY_PROJECT", "bcbs-mixed-eligibility"
+)
+# Default / demo project
 TRACING_PROJECT = os.getenv("LANGSMITH_MIXED_PROJECT", "bcbs-mixed")
 
 APPLICATION_NAME = os.getenv("LANGSMITH_APPLICATION", "bcbs-poc")
@@ -47,13 +53,15 @@ def ensure_mixed_tracing_project(
     *,
     description: str | None = None,
     set_active: bool = True,
+    application: str | None = None,
 ) -> str:
-    """Create/upsert a mixed-agents LangSmith project under Application=bcbs-poc.
+    """Create/upsert a mixed-agents LangSmith project tagged Application=bcbs-poc.
 
     If ``set_active`` is True, sets LANGSMITH_PROJECT so LangChain / @traceable
     land in this project.
     """
     name = project_name or TRACING_PROJECT
+    app = application or APPLICATION_NAME
     if set_active:
         os.environ["LANGSMITH_PROJECT"] = name
     os.environ.setdefault("LANGSMITH_TRACING", "true")
@@ -62,17 +70,17 @@ def ensure_mixed_tracing_project(
         return name
 
     client = Client()
-    app_tag_id = _application_tag_value_id(client, APPLICATION_NAME)
+    app_tag_id = _application_tag_value_id(client, app)
     project = client.create_project(
         project_name=name,
         description=description
         or (
             f"Mixed-agents traces ({name}). "
-            f"Same Application resource tag as {APPLICATION_NAME}."
+            f"Application resource tag: {app}."
         ),
         upsert=True,
         tag_value_ids=[app_tag_id],
-        metadata={"application": APPLICATION_NAME, "stack": "mixed-agents"},
+        metadata={"application": app, "stack": "mixed-agents"},
     )
 
     client.request_with_retries(
@@ -81,7 +89,7 @@ def ensure_mixed_tracing_project(
         json={
             "extra": {
                 "metadata": {
-                    "application": APPLICATION_NAME,
+                    "application": app,
                     "stack": "mixed-agents",
                     "langsmith_project": name,
                 },
@@ -101,13 +109,13 @@ def configure_maf_langsmith_otel(
     """Wire Microsoft Agent Framework OTEL → LangSmith OTLP endpoint.
 
     ``project_name`` is sent as the Langsmith-Project OTEL header (defaults to
-    FA1_PROJECT). No-op if LANGSMITH_API_KEY is missing.
+    INTAKE_PROJECT). No-op if LANGSMITH_API_KEY is missing.
     """
     api_key = os.getenv("LANGSMITH_API_KEY")
     if not api_key:
         return
 
-    name = project_name or FA1_PROJECT
+    name = project_name or INTAKE_PROJECT
     os.environ["ENABLE_INSTRUMENTATION"] = "true"
     os.environ.setdefault("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
     os.environ.setdefault(

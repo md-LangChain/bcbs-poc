@@ -1,0 +1,9 @@
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "python_version": "3.13",
+  "dependencies": ["../.."],
+  "graphs": {
+    "intake": "./intake.py:intake_agent"
+  },
+  "env": "../../.env"
+}

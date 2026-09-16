@@ -4,7 +4,7 @@ case_id → read CSV → flag missing fields → Case dict for FA-2.
 
 No PHI redaction in this mixed-agents path (intentional contrast with agents/).
 
-Tracing (LangSmith project bcbs-mixed-fa1) via MAF OpenTelemetry:
+Tracing (LangSmith project bcbs-mixed-intake) via MAF OpenTelemetry:
   https://docs.langchain.com/langsmith/trace-with-microsoft-agent-framework
 
 Expect traces like: invoke_agent → chat → read_case / validate_case → chat
@@ -28,21 +28,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-from tracing import (  # noqa: E402
-    FA1_PROJECT,
+from utils.tracing import (  # noqa: E402
+    INTAKE_PROJECT,
     configure_maf_langsmith_otel,
     ensure_mixed_tracing_project,
     flush_otel,
 )
 
-# Import Case from fa_2 first (fa_2 may set LANGSMITH_PROJECT to fa2), then pin FA-1.
-from fa_2 import Case  # noqa: E402
+# Import Case from validation first (may set LANGSMITH_PROJECT), then pin intake.
+from validation import Case  # noqa: E402
 
 ensure_mixed_tracing_project(
-    FA1_PROJECT,
-    description="Mixed-agents FA-1 (Microsoft Agent Framework) intake traces.",
+    INTAKE_PROJECT,
+    description="Mixed-agents intake (Microsoft Agent Framework) traces.",
 )
-configure_maf_langsmith_otel(FA1_PROJECT)
+configure_maf_langsmith_otel(INTAKE_PROJECT)
 
 from agent_framework import Agent, tool  # noqa: E402
 from agent_framework.openai import OpenAIChatCompletionClient  # noqa: E402
@@ -199,4 +199,4 @@ if __name__ == "__main__":
     print("missing_fields:", result.get("missing_fields"))
     note = result.get("ClinicalNoteFreeText") or ""
     print("ClinicalNoteFreeText:", note[:200], "..." if len(note) > 200 else "")
-    print(f"→ LangSmith project {FA1_PROJECT}: open 'invoke_agent fa-1-intake'")
+    print(f"→ LangSmith project {INTAKE_PROJECT}: open 'invoke_agent fa-1-intake'")
