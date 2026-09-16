@@ -45,7 +45,8 @@ class Case(TypedDict):
     error: NotRequired[str | None]
     missing_fields: NotRequired[list[str]]
     high_cost: NotRequired[bool]
-    eligible: NotRequired[bool]
+    eligible: NotRequired[bool | None]
+    eligibility_error: NotRequired[str | None]
 
 
 class CriteriaResult(BaseModel):
@@ -69,7 +70,8 @@ def _criteria_llm():
 def run_intake(case_id: str) -> str:
     """Run FA-1 intake/validation for a prior-auth case id (e.g. PA-1001).
 
-    Returns JSON with case fields plus error, missing_fields, high_cost, eligible.
+    Returns JSON with case fields plus error, missing_fields, high_cost, eligible,
+    and eligibility_error (set when eligibility could not be verified).
     Pauses for human input when intake reports errors, missing fields, or high cost.
     """
 
@@ -92,6 +94,7 @@ def run_intake(case_id: str) -> str:
         "missing_fields": result.get("missing_fields"),
         "high_cost": result.get("high_cost"),
         "eligible": result.get("eligible"),
+        "eligibility_error": result.get("eligibility_error"),
     }
 
     needs_hitl = bool(
@@ -197,6 +200,9 @@ SYSTEM_PROMPT = (
     "for the same case id.\n"
     "4) Explain results clearly:\n"
     "   - Intake HITL (validation failure or high_cost): use human_decision + payload.\n"
+    "   - Eligibility: when eligibility_error is set, state plainly that member "
+    "eligibility could not be verified and that field validation still completed; "
+    "never call the member eligible or ineligible in that case.\n"
     "   - Criteria: report meets_criteria, borderline, and rationale. "
     "If borderline HITL paused, summarize the human decision after resume.\n"
     "Do not invent clinical values. Keep replies concise."
