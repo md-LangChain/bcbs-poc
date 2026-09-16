@@ -7,8 +7,10 @@ from typing import NotRequired, TypedDict
 
 from dotenv import load_dotenv
 from langchain.agents import create_agent
+from langchain.agents.middleware import ToolCallRequest, ToolErrorMiddleware
 from langchain.chat_models import init_chat_model
 from langchain.tools import tool
+from langgraph.errors import GraphBubbleUp
 from langgraph.types import interrupt
 from pydantic import BaseModel, Field
 
@@ -61,6 +63,19 @@ class CriteriaResult(BaseModel):
     rationale: str = Field(description="Short rationale; use only provided fields")
 
 
+def _tool_error_payload(exc: Exception, request: ToolCallRequest) -> str:
+    """Turn any unhandled tool exception into a tool result the model can relay."""
+    # A tools superstep that raises never commits a ToolMessage, so the checkpoint keeps
+    # an assistant message with unanswered tool_call_ids and every later turn 400s.
+    return json.dumps(
+        {
+            "tool": request.tool_call["name"],
+            "error": "tool_failed",
+            "detail": type(exc).__name__,
+        }
+    )
+
+
 def _criteria_llm():
     return init_chat_model("openai:gpt-4.1-mini").with_structured_output(CriteriaResult)
 
@@ -74,12 +89,24 @@ def run_intake(case_id: str) -> str:
     """
 
     #import and use intake agent 
-    from fa_1 import intake_agent
+    try:
+        from fa_1 import intake_agent
 
-    result = intake_agent.invoke(
-        {"case_id": case_id},
-        config={"configurable": {"thread_id": case_id}},
-    )
+        result = intake_agent.invoke(
+            {"case_id": case_id},
+            config={"configurable": {"thread_id": case_id}},
+        )
+    except GraphBubbleUp:
+        raise
+    except Exception as exc:
+        return json.dumps(
+            {
+                "case_id": case_id,
+                "error": "intake_unavailable",
+                "detail": f"{type(exc).__name__}: {exc}",
+            },
+            default=str,
+        )
     # Drop bulky free-text for the tool payload; agent can still see key flags.
     payload = {
         "case_id": case_id,
@@ -207,6 +234,7 @@ fa2 = create_agent(
     model="openai:gpt-4.1-mini",
     tools=[run_intake, evaluate_criteria],
     system_prompt=SYSTEM_PROMPT,
+    middleware=[ToolErrorMiddleware(_tool_error_payload)],
     name="fa2-validation-agent",
     # No custom checkpointer — langgraph dev / API provide persistence.
 )
@@ -222,6 +250,7 @@ if __name__ == "__main__":
         model="openai:gpt-4.1-mini",
         tools=[run_intake, evaluate_criteria],
         system_prompt=SYSTEM_PROMPT,
+        middleware=[ToolErrorMiddleware(_tool_error_payload)],
         name="fa2-validation-agent-local",
         checkpointer=MemorySaver(),
     )
