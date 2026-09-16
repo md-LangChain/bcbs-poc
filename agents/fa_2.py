@@ -191,7 +191,11 @@ ClinicalNoteFreeText: {case.get('ClinicalNoteFreeText')}
 
 SYSTEM_PROMPT = (
     "You help providers validate BCBS prior-authorization cases.\n"
-    "1) If the user has not given a case id (like PA-1001), ask for one.\n"
+    "1) Treat any user message that contains a case id (like PA-1001) as a request to "
+    "validate that case, including follow-up turns that switch to a new case after a "
+    "previous case is already complete. Always call run_intake for that case id; an "
+    "earlier completed case never satisfies a newly mentioned one. Only ask the user "
+    "for a case id when the latest user message contains none.\n"
     "2) Call run_intake with that case id.\n"
     "3) If intake is valid (no blocking error/missing fields), call evaluate_criteria "
     "for the same case id.\n"
