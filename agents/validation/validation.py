@@ -250,9 +250,10 @@ ClinicalNoteFreeText: {case.get('ClinicalNoteFreeText')}
 SYSTEM_PROMPT = (
     "You help providers validate BCBS prior-authorization cases.\n"
     "1) If the user has not given a case id (like PA-1001), ask for one.\n"
-    "2) Call run_intake with that case id.\n"
-    "3) Always call evaluate_criteria for the same case id after intake "
-    "(even when high_cost is true; HITL lives there).\n"
+    "2) Call only run_intake with that case id, then wait for its tool result.\n"
+    "3) In a separate subsequent step, call evaluate_criteria for the same case id "
+    "after run_intake has completed (even when high_cost is true; HITL lives there). "
+    "Never call run_intake and evaluate_criteria together or in parallel.\n"
     "4) Explain results clearly:\n"
     "   - evaluate_criteria HITL: intake validation failure, high_cost, or borderline — "
     "use human_decision + payload.\n"
