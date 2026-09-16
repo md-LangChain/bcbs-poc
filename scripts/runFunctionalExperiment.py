@@ -15,9 +15,14 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "agents" / "validation"))
 load_dotenv(ROOT / ".env")
 
-from validation import SYSTEM_PROMPT, evaluate_criteria, run_intake  # noqa: E402
+from validation import (  # pyright: ignore[reportMissingImports]  # noqa: E402
+    SYSTEM_PROMPT,
+    Fa2State,
+    evaluate_criteria,
+    run_intake,
+)
 
-DATASET_NAME = "PriorAuth Dataset"
+DATASET_NAME = "PriorAuth Golden Dataset"
 
 
 def get_interrupt_type(result: dict) -> str:
@@ -38,6 +43,7 @@ def target(inputs: dict) -> dict:
         system_prompt=SYSTEM_PROMPT,
         name="validation-eval",
         checkpointer=MemorySaver(),
+        state_schema=Fa2State,
     )
 
     result = agent.invoke(
