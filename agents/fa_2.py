@@ -94,8 +94,12 @@ def run_intake(case_id: str) -> str:
         "eligible": result.get("eligible"),
     }
 
+    ineligible = result.get("eligible") is False
     needs_hitl = bool(
-        result.get("error") or result.get("missing_fields") or result.get("high_cost")
+        result.get("error")
+        or result.get("missing_fields")
+        or result.get("high_cost")
+        or ineligible
     )
     if needs_hitl:
         if result.get("error") or result.get("missing_fields"):
@@ -104,6 +108,15 @@ def run_intake(case_id: str) -> str:
                 "Intake found problems. Review missing fields / error, "
                 "then resume with a note (e.g. how you will fix) or cancel."
             )
+        elif ineligible:
+            # Ineligibility is dispositive, so it outranks a high-cost pause.
+            interrupt_type = "ineligible_member_hitl"
+            message = (
+                "Member is not eligible on the service date. "
+                "Human review is required before any approval. "
+                "Resume with deny, override, or request-more-info."
+            )
+            payload["eligibility_reason"] = result.get("eligibility_reason")
         else:
             interrupt_type = "high_cost_hitl"
             message = (
@@ -144,6 +157,19 @@ def evaluate_criteria(case_id: str) -> str:
                 "reason": "Case failed intake validation; fix intake first.",
                 "error": case.get("error"),
                 "missing_fields": case.get("missing_fields"),
+            },
+            default=str,
+        )
+    if case.get("eligible") is False:
+        return json.dumps(
+            {
+                "case_id": case_id,
+                "skipped": True,
+                "reason": (
+                    "Member not eligible; resolve eligibility before clinical review"
+                ),
+                "eligible": False,
+                "eligibility_reason": case.get("eligibility_reason"),
             },
             default=str,
         )
@@ -196,7 +222,14 @@ SYSTEM_PROMPT = (
     "3) If intake is valid (no blocking error/missing fields), call evaluate_criteria "
     "for the same case id.\n"
     "4) Explain results clearly:\n"
-    "   - Intake HITL (validation failure or high_cost): use human_decision + payload.\n"
+    "   - Intake HITL (validation failure, ineligible member, or high_cost): "
+    "use human_decision + payload.\n"
+    "   - Eligibility: state the member's eligibility from intake in every case "
+    "summary, whether or not the user asks. If eligible is false, say plainly that "
+    "the member is not eligible on the service date and that clinical criteria alone "
+    "cannot authorize the service. Never present an ineligible case as approvable, "
+    "never ask the user to proceed with approval, and never reinterpret, qualify, or "
+    "downplay the eligibility flag.\n"
     "   - Criteria: report meets_criteria, borderline, and rationale. "
     "If borderline HITL paused, summarize the human decision after resume.\n"
     "Do not invent clinical values. Keep replies concise."
