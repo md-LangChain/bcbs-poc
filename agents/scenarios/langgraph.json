@@ -1,0 +1,9 @@
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "python_version": "3.13",
+  "dependencies": ["../.."],
+  "graphs": {
+    "a2a-validation": "./a2a-validation.py:validation_agent"
+  },
+  "env": "../../.env"
+}

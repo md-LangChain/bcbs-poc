@@ -5,7 +5,8 @@
   "graphs": {
     "intake": "./agents/intake/intake.py:intake_agent",
     "validation": "./agents/validation/validation.py:validation_agent",
-    "eligibility": "./agents/eligibility/eligibility.py:eligibility_agent"
+    "eligibility": "./agents/eligibility/eligibility.py:eligibility_agent",
+    "a2a-validation": "./agents/scenarios/a2a-validation.py:validation_agent"
   },
   "env": ".env"
 }
