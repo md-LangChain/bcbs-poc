@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
+from typing import Any
 
 _SSN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
 _SSN_LABELED_NODASH = re.compile(r"\bSSN\s+\d{9}\b", re.IGNORECASE)
@@ -105,3 +107,47 @@ def redact_clinical_note(text: str | None) -> str | None:
     text = _redact_demo_names(text)
     text = _redact_address(text)
     return text
+
+
+# Dataset columns that carry member / provider identifiers.
+IDENTIFIER_FIELDS = (
+    "SyntheticMemberID",
+    "SyntheticDOB",
+    "RequestingProviderNPI",
+)
+
+_BARE_NPI = re.compile(r"\b\d{10}\b")
+
+_IDENTIFIER_VALUE_REDACTORS = (
+    (_MEMBER_ID, "[REDACTED_MEMBER_ID]"),
+    (_POLICY, "[REDACTED_POLICY]"),
+    (_SSN, "[REDACTED_SSN]"),
+    (_DOB_NUMERIC, "[REDACTED_DOB]"),
+    (_DOB_SPELLED, "[REDACTED_DOB]"),
+    (_BARE_NPI, "[REDACTED_NPI]"),
+)
+
+
+def _redact_identifier_value(value: Any) -> Any:
+    """Scrub identifier-shaped content from a single case field value."""
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        # NPI columns arrive from the CSV as numbers, not strings.
+        return "[REDACTED_NPI]" if _BARE_NPI.fullmatch(str(value)) else value
+    if not isinstance(value, str):
+        return value
+    for pattern, placeholder in _IDENTIFIER_VALUE_REDACTORS:
+        value = pattern.sub(placeholder, value)
+    return value
+
+
+def redact_case_identifiers(case: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Drop identifier columns from a case record and scrub identifier-shaped values."""
+    if not case:
+        return {}
+    return {
+        field: _redact_identifier_value(value)
+        for field, value in case.items()
+        if field not in IDENTIFIER_FIELDS
+    }

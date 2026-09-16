@@ -15,6 +15,8 @@ from pydantic import BaseModel, Field
 # langgraph dev loads this file by path, so siblings are not importable by default
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from redact_phi import redact_case_identifiers
+
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 #delete comment 
@@ -46,6 +48,28 @@ class Case(TypedDict):
     missing_fields: NotRequired[list[str]]
     high_cost: NotRequired[bool]
     eligible: NotRequired[bool]
+
+
+# Only these fields may leave the FA-1 intake subgraph: no member/provider
+# identifiers in tool payloads or in anything written to FA-2 graph state.
+INTAKE_CASE_FIELDS = (
+    "case_id",
+    "CaseID",
+    "ServiceRequested",
+    "CPTCode",
+    "ICD10Code",
+    "EstimatedCost",
+    "error",
+    "missing_fields",
+    "high_cost",
+    "eligible",
+)
+
+
+def project_intake_case(case: Case) -> dict:
+    """Allowlisted, identifier-free view of an intake case for use outside FA-1."""
+    projection = {field: case.get(field) for field in INTAKE_CASE_FIELDS}
+    return redact_case_identifiers(projection)
 
 
 class CriteriaResult(BaseModel):
@@ -80,19 +104,8 @@ def run_intake(case_id: str) -> str:
         {"case_id": case_id},
         config={"configurable": {"thread_id": case_id}},
     )
-    # Drop bulky free-text for the tool payload; agent can still see key flags.
-    payload = {
-        "case_id": case_id,
-        "CaseID": result.get("CaseID"),
-        "ServiceRequested": result.get("ServiceRequested"),
-        "CPTCode": result.get("CPTCode"),
-        "ICD10Code": result.get("ICD10Code"),
-        "EstimatedCost": result.get("EstimatedCost"),
-        "error": result.get("error"),
-        "missing_fields": result.get("missing_fields"),
-        "high_cost": result.get("high_cost"),
-        "eligible": result.get("eligible"),
-    }
+    # Drop bulky free-text and identifiers; agent can still see key flags.
+    payload = {**project_intake_case(result), "case_id": case_id}
 
     needs_hitl = bool(
         result.get("error") or result.get("missing_fields") or result.get("high_cost")
@@ -132,9 +145,11 @@ def evaluate_criteria(case_id: str) -> str:
     """
     from fa_1 import intake_agent
 
-    case = intake_agent.invoke(
-        {"case_id": case_id},
-        config={"configurable": {"thread_id": f"criteria-{case_id}"}},
+    case = redact_case_identifiers(
+        intake_agent.invoke(
+            {"case_id": case_id},
+            config={"configurable": {"thread_id": f"criteria-{case_id}"}},
+        )
     )
     if case.get("error") or case.get("missing_fields"):
         return json.dumps(
