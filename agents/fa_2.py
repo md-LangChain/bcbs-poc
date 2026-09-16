@@ -15,6 +15,12 @@ from pydantic import BaseModel, Field
 # langgraph dev loads this file by path, so siblings are not importable by default
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from run_metadata import (
+    app_environment,
+    record_reviewer_agreement,
+    set_root_run_metadata,
+)
+
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 #delete comment 
@@ -80,6 +86,11 @@ def run_intake(case_id: str) -> str:
         {"case_id": case_id},
         config={"configurable": {"thread_id": case_id}},
     )
+    set_root_run_metadata(
+        case_id=case_id,
+        planted_test_condition=result.get("PlantedTestCondition"),
+        environment=app_environment(),
+    )
     # Drop bulky free-text for the tool payload; agent can still see key flags.
     payload = {
         "case_id": case_id,
@@ -119,6 +130,7 @@ def run_intake(case_id: str) -> str:
             }
         )
         payload["human_decision"] = decision
+        record_reviewer_agreement(decision)
 
     return json.dumps(payload, default=str)
 
@@ -185,6 +197,7 @@ ClinicalNoteFreeText: {case.get('ClinicalNoteFreeText')}
             }
         )
         payload["human_decision"] = decision
+        record_reviewer_agreement(decision)
 
     return json.dumps(payload, default=str)
 
@@ -217,6 +230,7 @@ if __name__ == "__main__":
 
     from langgraph.checkpoint.memory import MemorySaver
     from langgraph.types import Command
+    from langsmith.run_helpers import tracing_context
 
     local = create_agent(
         model="openai:gpt-4.1-mini",
@@ -229,18 +243,19 @@ if __name__ == "__main__":
         "configurable": {"thread_id": f"fa2-demo-{uuid.uuid4().hex[:8]}"},
         "tags": ["bcbs", "fa-2"],
     }
-    first = local.invoke(
-        {"messages": [{"role": "user", "content": "I need to validate a prior auth case."}]},
-        config,
-    )
-    print(first["messages"][-1].content)
-    second = local.invoke(
-        {"messages": [{"role": "user", "content": "PA-1001"}]},
-        config,
-    )
-    if "__interrupt__" in second:
-        print("INTERRUPTED:", second["__interrupt__"])
-        resumed = local.invoke(Command(resume="approve"), config)
-        print(resumed["messages"][-1].content)
-    else:
-        print(second["messages"][-1].content)
+    with tracing_context(metadata={"environment": app_environment()}):
+        first = local.invoke(
+            {"messages": [{"role": "user", "content": "I need to validate a prior auth case."}]},
+            config,
+        )
+        print(first["messages"][-1].content)
+        second = local.invoke(
+            {"messages": [{"role": "user", "content": "PA-1001"}]},
+            config,
+        )
+        if "__interrupt__" in second:
+            print("INTERRUPTED:", second["__interrupt__"])
+            resumed = local.invoke(Command(resume="approve"), config)
+            print(resumed["messages"][-1].content)
+        else:
+            print(second["messages"][-1].content)

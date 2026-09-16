@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fa_2 import Case, IntakeInput
 from redact_phi import redact_clinical_note
+from run_metadata import app_environment, set_root_run_metadata
 
 load_dotenv()
 
@@ -54,6 +55,7 @@ def read_case(state: Case) -> dict:
     match = df[df["CaseID"] == state["case_id"]]
 
     if match.empty:
+        set_root_run_metadata(case_id=state["case_id"], environment=app_environment())
         return {"error": f"CaseID not found: {state['case_id']}"}
 
     row = {
@@ -63,6 +65,11 @@ def read_case(state: Case) -> dict:
     if row.get("EstimatedCost") is not None:
         row["EstimatedCost"] = float(row["EstimatedCost"])
     row["error"] = None
+    set_root_run_metadata(
+        case_id=state["case_id"],
+        planted_test_condition=row.get("PlantedTestCondition"),
+        environment=app_environment(),
+    )
     return row
 
 
