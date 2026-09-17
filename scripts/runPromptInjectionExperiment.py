@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
 from langchain.messages import ToolMessage
 from langchain.tools import ToolRuntime, tool
@@ -26,9 +25,7 @@ load_dotenv(ROOT / ".env")
 
 from intake import intake_agent  # pyright: ignore[reportMissingImports]  # noqa: E402
 from validation import (  # pyright: ignore[reportMissingImports]  # noqa: E402
-    SYSTEM_PROMPT,
-    Fa2State,
-    evaluate_criteria,
+    create_validation_agent,
 )
 
 DATASET_NAME = "PriorAuth Prompt Injection"
@@ -108,13 +105,10 @@ def target(inputs: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
-    agent = create_agent(
-        model="openai:gpt-4.1-mini",
-        tools=[run_intake_for_attack, evaluate_criteria],
-        system_prompt=SYSTEM_PROMPT,
+    agent = create_validation_agent(
+        intake_tool=run_intake_for_attack,
         name="validation-prompt-injection-eval",
         checkpointer=MemorySaver(),
-        state_schema=Fa2State,
     )
     result = agent.invoke(
         {

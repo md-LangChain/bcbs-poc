@@ -12,6 +12,7 @@ from langchain.chat_models import init_chat_model
 from langchain.messages import ToolMessage
 from langchain.tools import ToolRuntime, tool
 from langgraph.types import Command, interrupt
+from langsmith import Client
 from pydantic import BaseModel, Field
 
 _AGENT_DIR = Path(__file__).resolve().parent
@@ -23,6 +24,15 @@ sys.path.insert(0, str(_AGENTS_DIR / "intake"))
 
 load_dotenv(_REPO_ROOT / ".env")
 os.environ["LANGSMITH_PROJECT"] = "bcbs-validation-agent"
+
+VALIDATION_CONTEXT = os.getenv(
+    "LANGSMITH_VALIDATION_CONTEXT",
+    "bcbs-validation-system-prompt",
+)
+VALIDATION_CONTEXT_VERSION = os.getenv(
+    "LANGSMITH_VALIDATION_CONTEXT_VERSION",
+    "production",
+)
 
 
 class IntakeInput(TypedDict):
@@ -247,28 +257,43 @@ ClinicalNoteFreeText: {case.get('ClinicalNoteFreeText')}
     return json.dumps(payload, default=str)
 
 
-SYSTEM_PROMPT = (
-    "You help providers validate BCBS prior-authorization cases.\n"
-    "1) If the user has not given a case id (like PA-1001), ask for one.\n"
-    "2) Call only run_intake with that case id, then wait for its tool result.\n"
-    "3) In a separate subsequent step, call evaluate_criteria for the same case id "
-    "after run_intake has completed (even when high_cost is true; HITL lives there). "
-    "Never call run_intake and evaluate_criteria together or in parallel.\n"
-    "4) Explain results clearly:\n"
-    "   - evaluate_criteria HITL: intake validation failure, high_cost, or borderline — "
-    "use human_decision + payload.\n"
-    "   - Criteria: report meets_criteria, borderline, and rationale.\n"
-    "Do not invent clinical values. Keep replies concise."
-)
+def _load_system_prompt() -> str:
+    """Pull the promoted validation prompt from Context Hub."""
+    context = Client().pull_agent(
+        VALIDATION_CONTEXT,
+        version=VALIDATION_CONTEXT_VERSION,
+    )
+    entry = context.files.get("AGENTS.md")
+    content = getattr(entry, "content", None)
+    if not isinstance(content, str) or not content.strip():
+        raise RuntimeError(
+            f"Context {VALIDATION_CONTEXT!r}:{VALIDATION_CONTEXT_VERSION} "
+            "has no usable AGENTS.md"
+        )
+    return content
 
 
-validation_agent = create_agent(
-    model="openai:gpt-4.1-mini",
-    tools=[run_intake, evaluate_criteria],
-    system_prompt=SYSTEM_PROMPT,
-    state_schema=Fa2State,
-    name="validation",
-)
+SYSTEM_PROMPT = _load_system_prompt()
+
+
+def create_validation_agent(
+    *,
+    intake_tool=run_intake,
+    checkpointer=None,
+    name: str = "validation",
+):
+    """Build validation consistently for deployment and evaluation."""
+    return create_agent(
+        model="openai:gpt-4.1-mini",
+        tools=[intake_tool, evaluate_criteria],
+        system_prompt=SYSTEM_PROMPT,
+        state_schema=Fa2State,
+        checkpointer=checkpointer,
+        name=name,
+    )
+
+
+validation_agent = create_validation_agent()
 
 
 if __name__ == "__main__":
