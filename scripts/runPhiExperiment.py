@@ -14,19 +14,19 @@ from dotenv import load_dotenv
 from langsmith import Client, evaluate
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "agents" / "intake"))
 sys.path.insert(0, str(ROOT / "agents"))
 load_dotenv(ROOT / ".env")
 
-from fa_1 import intake_agent  # noqa: E402
+from intake import intake_agent  # noqa: E402
 
 DATASET_NAME = "PriorAuth Dataset"
-FEEDBACK_KEY = "phi"  # PHI Detection — not phi_safe
-POLL_SECONDS = 90
+FEEDBACK_KEY = "phi"  # PHI Detection
 POLL_INTERVAL = 5
 
 
 def target(inputs: dict) -> dict:
-    """FA-1 intake (redact_phi) → model-bound text as evaluator \"output\"."""
+    """Intake (redact_phi) → model-bound text as evaluator \"output\"."""
     case_id = inputs["case_id"]
     case = intake_agent.invoke(
         {"case_id": case_id},

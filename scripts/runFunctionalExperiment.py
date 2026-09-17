@@ -1,4 +1,4 @@
-"""Evaluate FA-2 use cases: assert first interrupt type from graph state."""
+"""Evaluate validation use cases: assert first interrupt type from graph state."""
 
 from __future__ import annotations
 
@@ -12,12 +12,17 @@ from langgraph.checkpoint.memory import MemorySaver
 from langsmith import evaluate
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "agents"))
+sys.path.insert(0, str(ROOT / "agents" / "validation"))
 load_dotenv(ROOT / ".env")
 
-from fa_2 import SYSTEM_PROMPT, evaluate_criteria, run_intake  # noqa: E402
+from validation import (  # pyright: ignore[reportMissingImports]  # noqa: E402
+    SYSTEM_PROMPT,
+    Fa2State,
+    evaluate_criteria,
+    run_intake,
+)
 
-DATASET_NAME = "PriorAuth Dataset"
+DATASET_NAME = "PriorAuth Golden Dataset"
 
 
 def get_interrupt_type(result: dict) -> str:
@@ -30,14 +35,15 @@ def get_interrupt_type(result: dict) -> str:
 
 
 def target(inputs: dict) -> dict: 
-    """Invoke FA-2 once; return first interrupt type (no resume)."""
+    """Invoke validation once; return first interrupt type (no resume)."""
     case_id = inputs["case_id"]
     agent = create_agent(
         model="openai:gpt-4.1-mini",
         tools=[run_intake, evaluate_criteria],
         system_prompt=SYSTEM_PROMPT,
-        name="fa2-eval",
+        name="validation-eval",
         checkpointer=MemorySaver(),
+        state_schema=Fa2State,
     )
 
     result = agent.invoke(
@@ -76,7 +82,7 @@ if __name__ == "__main__":
         target,
         data=DATASET_NAME,
         evaluators=[interrupt_type_correct],
-        experiment_prefix="Experiment",
+        experiment_prefix="Functional-Experiment",
         max_concurrency=1,
     )
     print(results)

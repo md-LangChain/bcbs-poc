@@ -4,11 +4,11 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - "agents/fa_2.py"
-      - "agents/fa_1.py"
+      - "agents/validation/**"
+      - "agents/intake/**"
       - "agents/redact_phi.py"
       - "scripts/runPhiExperiment.py"
-      - "scripts/runExperiment.py"
+      - "scripts/runFunctionalExperiment.py"
 
 jobs:
   experiment:
