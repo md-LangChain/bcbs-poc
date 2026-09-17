@@ -12,7 +12,6 @@ from langchain.chat_models import init_chat_model
 from langchain.messages import ToolMessage
 from langchain.tools import ToolRuntime, tool
 from langgraph.types import Command, interrupt
-from langsmith import Client
 from pydantic import BaseModel, Field
 
 _AGENT_DIR = Path(__file__).resolve().parent
@@ -24,15 +23,6 @@ sys.path.insert(0, str(_AGENTS_DIR / "intake"))
 
 load_dotenv(_REPO_ROOT / ".env")
 os.environ["LANGSMITH_PROJECT"] = "bcbs-validation-agent"
-
-VALIDATION_CONTEXT = os.getenv(
-    "LANGSMITH_VALIDATION_CONTEXT",
-    "bcbs-validation-system-prompt",
-)
-VALIDATION_CONTEXT_VERSION = os.getenv(
-    "LANGSMITH_VALIDATION_CONTEXT_VERSION",
-    "production",
-)
 
 
 class IntakeInput(TypedDict):
@@ -257,23 +247,14 @@ ClinicalNoteFreeText: {case.get('ClinicalNoteFreeText')}
     return json.dumps(payload, default=str)
 
 
-def _load_system_prompt() -> str:
-    """Pull the promoted validation prompt from Context Hub."""
-    context = Client().pull_agent(
-        VALIDATION_CONTEXT,
-        version=VALIDATION_CONTEXT_VERSION,
+SYSTEM_PROMPT_NAME = os.getenv("VALIDATION_SYSTEM_PROMPT", "system-prompt2")
+if SYSTEM_PROMPT_NAME not in {"system-prompt1", "system-prompt2"}:
+    raise ValueError(
+        "VALIDATION_SYSTEM_PROMPT must be 'system-prompt1' or 'system-prompt2'"
     )
-    entry = context.files.get("AGENTS.md")
-    content = getattr(entry, "content", None)
-    if not isinstance(content, str) or not content.strip():
-        raise RuntimeError(
-            f"Context {VALIDATION_CONTEXT!r}:{VALIDATION_CONTEXT_VERSION} "
-            "has no usable AGENTS.md"
-        )
-    return content
-
-
-SYSTEM_PROMPT = _load_system_prompt()
+SYSTEM_PROMPT = (
+    (_AGENT_DIR / f"{SYSTEM_PROMPT_NAME}.txt").read_text(encoding="utf-8").strip()
+)
 
 
 def create_validation_agent(
