@@ -16,6 +16,7 @@ from langchain.chat_models import init_chat_model
 from langchain.messages import ToolMessage
 from langchain.tools import ToolRuntime, tool
 from langgraph.types import Command, interrupt
+from langsmith import traceable
 from pydantic import BaseModel, Field
 
 _AGENT_DIR = Path(__file__).resolve().parent
@@ -132,6 +133,16 @@ def _resolve_intake_assistant_id() -> str:
     return str(assistants[0]["assistant_id"])
 
 
+@traceable(
+    name="a2a:intake",
+    run_type="tool",
+    tags=["a2a", "intake"],
+    metadata={
+        "protocol": "a2a",
+        "a2a_method": "message/send",
+        "target_graph": "intake",
+    },
+)
 def _run_intake_a2a(case_id: str) -> dict[str, Any]:
     """Invoke intake through A2A and extract its structured output artifact."""
     assistant_id = _resolve_intake_assistant_id()
