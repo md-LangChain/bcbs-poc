@@ -25,6 +25,11 @@ _REPO_ROOT = _AGENTS_DIR.parent
 load_dotenv(_REPO_ROOT / ".env")
 os.environ["LANGSMITH_PROJECT"] = "bcbs-validation-agent"
 
+# Model string for init_chat_model / create_agent. Override to route through the
+# LangSmith LLM Gateway, which requires provider/model form:
+#   VALIDATION_MODEL=openai:openai/gpt-4.1-mini
+VALIDATION_MODEL = os.getenv("VALIDATION_MODEL", "openai:gpt-4.1-mini")
+
 INTAKE_URL = os.getenv(
     "INTAKE_URL",
     "https://intake-agent-86af57ffbd905e1db5ab112132a2e494.us.langgraph.app",
@@ -83,7 +88,7 @@ class CriteriaResult(BaseModel):
 
 
 def _criteria_llm():
-    return init_chat_model("openai:gpt-4.1-mini").with_structured_output(CriteriaResult)
+    return init_chat_model(VALIDATION_MODEL).with_structured_output(CriteriaResult)
 
 
 def _intake_matches(case: dict[str, Any] | None, case_id: str) -> bool:
@@ -343,7 +348,7 @@ SYSTEM_PROMPT = (
 
 
 validation_agent = create_agent(
-    model="openai:gpt-4.1-mini",
+    model=VALIDATION_MODEL,
     tools=[run_intake, evaluate_criteria],
     system_prompt=SYSTEM_PROMPT,
     state_schema=Fa2State,
@@ -358,7 +363,7 @@ if __name__ == "__main__":
     from langgraph.types import Command as ResumeCommand
 
     local = create_agent(
-        model="openai:gpt-4.1-mini",
+        model=VALIDATION_MODEL,
         tools=[run_intake, evaluate_criteria],
         system_prompt=SYSTEM_PROMPT,
         state_schema=Fa2State,

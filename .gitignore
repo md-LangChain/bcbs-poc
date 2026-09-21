@@ -26,3 +26,4 @@ __pycache__/
 
 # Local webhook / runtime logs
 logs/
+.dev-logs/
