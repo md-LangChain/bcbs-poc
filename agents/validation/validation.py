@@ -8,9 +8,11 @@ import os
 
 from dotenv import load_dotenv
 from langchain.agents import AgentState, create_agent
+from langchain.agents.middleware import ToolCallRequest, ToolErrorMiddleware
 from langchain.chat_models import init_chat_model
 from langchain.messages import ToolMessage
 from langchain.tools import ToolRuntime, tool
+from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command, interrupt
 from langsmith import Client
 from pydantic import BaseModel, Field
@@ -109,10 +111,33 @@ def run_intake(case_id: str, runtime: ToolRuntime) -> Command:
     """
     from intake import intake_agent
 
-    result = intake_agent.invoke(
-        {"case_id": case_id},
-        config={"configurable": {"thread_id": case_id}},
-    )
+    try:
+        result = intake_agent.invoke(
+            {"case_id": case_id},
+            config={"configurable": {"thread_id": case_id}},
+        )
+    except GraphBubbleUp:
+        raise
+    except Exception as exc:  # noqa: BLE001 - intake faults are reported to the model
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=json.dumps(
+                            {
+                                "case_id": case_id,
+                                "error": "intake_unavailable",
+                                "detail": f"{type(exc).__name__}: {exc}",
+                            },
+                            default=str,
+                        ),
+                        tool_call_id=runtime.tool_call_id,
+                        status="error",
+                    )
+                ]
+            }
+        )
+
     # Slim payload for the model; full case stays in state.intake_case.
     payload = {
         "case_id": case_id,
@@ -321,6 +346,24 @@ def _load_system_prompt() -> str:
 SYSTEM_PROMPT = _load_system_prompt()
 
 
+def _tool_error_content(exc: Exception, request: ToolCallRequest) -> str:
+    """Report an unhandled tool failure to the model as an error ToolMessage."""
+    return json.dumps(
+        {
+            "tool": request.tool_call.get("name"),
+            "error": "tool_failed",
+            "detail": type(exc).__name__,
+        },
+        default=str,
+    )
+
+
+# Without this every unhandled tool exception crashes the tools superstep before any
+# ToolMessage is committed, leaving the checkpoint with unanswered tool_call_ids that
+# make later turns on the thread unreplayable.
+TOOL_ERROR_MIDDLEWARE = ToolErrorMiddleware(_tool_error_content)
+
+
 def create_validation_agent(
     *,
     intake_tool=run_intake,
@@ -333,6 +376,7 @@ def create_validation_agent(
         tools=[intake_tool, evaluate_criteria],
         system_prompt=SYSTEM_PROMPT,
         state_schema=Fa2State,
+        middleware=[TOOL_ERROR_MIDDLEWARE],
         checkpointer=checkpointer,
         name=name,
     )
@@ -352,6 +396,7 @@ if __name__ == "__main__":
         tools=[run_intake, evaluate_criteria],
         system_prompt=SYSTEM_PROMPT,
         state_schema=Fa2State,
+        middleware=[TOOL_ERROR_MIDDLEWARE],
         name="validation-local",
         checkpointer=MemorySaver(),
     )
