@@ -1,6 +1,8 @@
 """Validation agent — intake tool + POC clinical criteria eval."""
 
+import hashlib
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Any, NotRequired, TypedDict
@@ -14,6 +16,8 @@ from langchain.tools import ToolRuntime, tool
 from langgraph.types import Command, interrupt
 from langsmith import Client
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 _AGENT_DIR = Path(__file__).resolve().parent
 _AGENTS_DIR = _AGENT_DIR.parent
@@ -284,12 +288,21 @@ Rules:
 """
 
 
-def _load_system_prompt() -> str:
-    """Pull the promoted validation prompt from Context Hub.
+def _require_hub_prompt() -> bool:
+    """Hub prompt is mandatory unless this is a local dev run or explicitly opted out."""
+    configured = os.getenv("VALIDATION_PROMPT_REQUIRE_HUB", "").strip().lower()
+    if configured:
+        return configured in {"1", "true", "yes"}
+    return os.getenv("LANGSMITH_LANGGRAPH_API_VARIANT", "") != "local_dev"
+
+
+def _load_system_prompt() -> tuple[str, str]:
+    """Pull the promoted validation prompt from Context Hub; return (prompt, source).
 
     Falls back to FALLBACK_SYSTEM_PROMPT when the context is unavailable, so a
     fresh workspace (or an offline machine) can still run the agent locally.
-    Set VALIDATION_PROMPT_REQUIRE_HUB=true to fail loudly instead.
+    Outside a local dev run the hub is required and a failure raises; set
+    VALIDATION_PROMPT_REQUIRE_HUB=false to fall back anyway.
     """
     try:
         context = Client().pull_agent(
@@ -299,7 +312,8 @@ def _load_system_prompt() -> str:
         entry = context.files.get("AGENTS.md")
         content = getattr(entry, "content", None)
         if isinstance(content, str) and content.strip():
-            return content
+            source = f"context_hub:{VALIDATION_CONTEXT}:{VALIDATION_CONTEXT_VERSION}"
+            return content, source
         reason = (
             f"Context {VALIDATION_CONTEXT!r}:{VALIDATION_CONTEXT_VERSION} "
             "has no usable AGENTS.md"
@@ -307,18 +321,23 @@ def _load_system_prompt() -> str:
     except Exception as exc:  # noqa: BLE001 - any hub/auth failure falls back
         reason = f"{type(exc).__name__}: {exc}"
 
-    if os.getenv("VALIDATION_PROMPT_REQUIRE_HUB", "").lower() in {"1", "true", "yes"}:
+    if _require_hub_prompt():
         raise RuntimeError(f"Context Hub prompt unavailable ({reason})")
 
-    print(
-        f"[validation] Context Hub prompt unavailable ({reason}); "
+    logger.warning(
+        "[validation] Context Hub prompt unavailable (%s); "
         "using FALLBACK_SYSTEM_PROMPT.",
-        file=sys.stderr,
+        reason,
     )
-    return FALLBACK_SYSTEM_PROMPT
+    return FALLBACK_SYSTEM_PROMPT, "fallback_literal"
 
 
-SYSTEM_PROMPT = _load_system_prompt()
+def _prompt_sha(prompt: str) -> str:
+    return hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
+
+
+SYSTEM_PROMPT, PROMPT_SOURCE = _load_system_prompt()
+PROMPT_SHA = _prompt_sha(SYSTEM_PROMPT)
 
 
 def create_validation_agent(
@@ -328,13 +347,16 @@ def create_validation_agent(
     name: str = "validation",
 ):
     """Build validation consistently for deployment and evaluation."""
-    return create_agent(
+    agent = create_agent(
         model=VALIDATION_MODEL,
         tools=[intake_tool, evaluate_criteria],
         system_prompt=SYSTEM_PROMPT,
         state_schema=Fa2State,
         checkpointer=checkpointer,
         name=name,
+    )
+    return agent.with_config(
+        metadata={"prompt_source": PROMPT_SOURCE, "prompt_sha": PROMPT_SHA}
     )
 
 

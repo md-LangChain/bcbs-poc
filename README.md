@@ -59,9 +59,11 @@ VALIDATION_MODEL=openai:openai/gpt-4.1-mini
 The gateway requires `provider/model` form, which is why `openai` appears twice.
 
 **Validation's system prompt** is pulled from LangSmith Context Hub at import.
-If that context is not in your workspace, the agent logs a warning and uses the
-built-in `FALLBACK_SYSTEM_PROMPT`. Set `VALIDATION_PROMPT_REQUIRE_HUB=true` to
-fail loudly instead.
+Outside a local dev run the hub is required and an unavailable context raises at
+startup; under `langgraph dev` the agent logs a warning and uses the built-in
+`FALLBACK_SYSTEM_PROMPT` instead. Set `VALIDATION_PROMPT_REQUIRE_HUB` to
+`true`/`false` to force either behaviour. Every validation run records which copy
+executed as `prompt_source` and `prompt_sha` run metadata.
 
 ## Running the pieces separately
 
