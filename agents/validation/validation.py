@@ -140,6 +140,11 @@ def run_intake(case_id: str, runtime: ToolRuntime) -> Command:
     )
 
 
+def _human_decision(gate: str, decision: Any) -> dict[str, Any]:
+    """Wrap a resumed HITL answer so the summary can attribute it to the reviewer."""
+    return {"source": "human_reviewer", "gate": gate, "decision": decision}
+
+
 @tool
 def evaluate_criteria(case_id: str, runtime: ToolRuntime) -> str:
     """POC InterQual-style clinical criteria check for a case id.
@@ -189,7 +194,9 @@ def evaluate_criteria(case_id: str, runtime: ToolRuntime) -> str:
                 **intake_payload,
                 "skipped": True,
                 "reason": "Case failed intake validation; fix intake first.",
-                "human_decision": decision,
+                "human_decision": _human_decision(
+                    "intake_validation_failed", decision
+                ),
             },
             default=str,
         )
@@ -206,7 +213,7 @@ def evaluate_criteria(case_id: str, runtime: ToolRuntime) -> str:
                 "payload": intake_payload,
             }
         )
-        intake_payload["human_decision"] = decision
+        intake_payload["human_decision"] = _human_decision("high_cost", decision)
         decision_text = str(decision).strip().lower()
         if decision_text in {"deny", "denied", "cancel", "cancelled", "reject"}:
             return json.dumps(
@@ -244,7 +251,7 @@ ClinicalNoteFreeText: {case.get('ClinicalNoteFreeText')}
         "high_cost": case.get("high_cost"),
     }
     if "human_decision" in intake_payload:
-        payload["high_cost_human_decision"] = intake_payload["human_decision"]
+        payload["human_decision"] = intake_payload["human_decision"]
 
     if result.borderline:
         decision = interrupt(
@@ -257,7 +264,7 @@ ClinicalNoteFreeText: {case.get('ClinicalNoteFreeText')}
                 "payload": payload,
             }
         )
-        payload["human_decision"] = decision
+        payload["human_decision"] = _human_decision("borderline", decision)
 
     return json.dumps(payload, default=str)
 
@@ -268,11 +275,15 @@ Given a case id such as PA-1001:
 1. Call run_intake to load and validate the case.
 2. Then call evaluate_criteria for the same case id.
 3. Summarize for the human reviewer: what was requested, whether intake found
-   problems, member eligibility, and the clinical criteria result with its rationale.
+   problems, member eligibility, the clinical criteria result with its rationale,
+   and any recorded human decision returned in the human_decision field.
 
 Rules:
 - Use only data returned by the tools. Never invent clinical facts, member
   details, costs, or eligibility.
+- If a HITL gate fired and a human decision was recorded, name the gate and
+  report the decision verbatim as the human reviewer's decision. Do not describe
+  it as pending and do not attribute it to the criteria tool or to yourself.
 - If intake reports an error or missing fields, say so plainly and stop. Do not
   guess at the missing values.
 - If the member is not eligible, say so prominently and recommend human review
